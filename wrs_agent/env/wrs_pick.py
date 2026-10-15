@@ -271,6 +271,8 @@ class VirtualPickPlace:
 
 
 async def advance_pick_place(call, planner, skill, state, args, stop, progress):
+    if skill == "place_on" and args.placement != "center":
+        raise SkillFailure("placement_not_supported")
     try:
         if skill == "pick":
             count = await call(planner.plan_pick, args.object)
@@ -293,7 +295,7 @@ async def advance_pick_place(call, planner, skill, state, args, stop, progress):
             state.version += 1
             progress((index + 1) / count)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), .02)
+                await asyncio.wait_for(stop.wait(), .02 / args.motion_speed)
         if stop.is_set():
             return False
         return await call(planner.verify)

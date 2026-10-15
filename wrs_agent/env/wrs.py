@@ -1,4 +1,4 @@
-"""Actual WRS UR7E + DH50 IK/FK, owned by one worker. No hardware connection."""
+"""Thread-owned WRS models: design's UR7E and the original FAFU mesh kitchen."""
 
 import asyncio
 import logging
@@ -43,9 +43,20 @@ def make_scene_object(wrs, object_id, data):
     """Construct only known, valid geometry; never invent an unknown pose."""
     if not data.valid or data.pos is None or data.rotmat is None or data.geometry is None:
         return None
+    if data.geometry.kind == "mesh":
+        from wrs.scene.scene_object import SceneObject
+
+        asset_root = (ROOT / "wrs_agent/assets").resolve()
+        path = (asset_root / data.geometry.asset).resolve()
+        if not path.is_relative_to(asset_root) or not path.is_file():
+            raise ValueError("mesh_asset_missing_or_outside_asset_root")
+        obj = SceneObject.from_file(str(path), rgb=data.rgb, alpha=data.alpha)
+        obj.name = object_id
+        obj.set_pos_rotmat(pos=data.pos, rotmat=data.rotmat)
+        return obj
     return wrs.wssop.box(
         pos=data.pos, rotmat=data.rotmat, xyz_lengths=data.geometry.xyz_lengths,
-        rgb=data.rgb, name=object_id,
+        rgb=data.rgb, alpha=data.alpha, name=object_id,
     )
 
 
@@ -66,7 +77,7 @@ def sync_scene_objects(wrs, scene, objects, displayed):
             displayed[name] = (data.model_copy(deep=True), obj)
 
 
-class VirtualModel:
+class URVirtualModel:
     """All methods, including construction, run on one owner thread."""
 
     def __init__(self):
@@ -201,6 +212,21 @@ class VirtualModel:
         )
 
 
+def VirtualModel():
+    return URVirtualModel()
+
+
+def display_model(snapshot):
+    if snapshot.data.facts.get("robot_model") == "fafu_baseV1":
+        from wrs_agent.env.fafu_backend import FafuModel
+
+        model = FafuModel()
+        if snapshot.data.robot.kinematics.gripper_width is not None:
+            model.enable_cooking_gripper()
+        return model
+    return URVirtualModel()
+
+
 class VirtualState:
     def __init__(self, kinematics, objects=None):
         self.version = 0
@@ -235,7 +261,7 @@ UNSUPPORTED = {
 }
 
 
-async def open_model(scene=None):
+async def open_model(scene=None, *, model_factory=None):
     """One WRS model on its own owner thread; returns (call, model, state, close)."""
     objects = await asyncio.to_thread(load_scene, scene) if scene is not None else {}
     owner = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wrs-model")
@@ -246,10 +272,22 @@ async def open_model(scene=None):
         return await loop.run_in_executor(owner, fn, *args)
 
     try:
-        model = await call(VirtualModel)
+        factory = model_factory or VirtualModel
+        if model_factory is None and any(
+            obj.geometry is not None and obj.geometry.kind == "mesh"
+            and obj.geometry.asset.startswith("kitchen/") for obj in objects.values()
+        ):
+            from wrs_agent.env.fafu_backend import FafuModel
+
+            factory = FafuModel
+        model = await call(factory)
         if scene is not None:
             objects = await call(model.load_scene, objects)
         state = VirtualState(await call(model.read), objects)
+        if getattr(model, "profile", None) == "fafu":
+            state.facts.update(robot_model="fafu_baseV1", calibration="fafu-baseV1-tool-link-v1",
+                               robot_base_x=model.base_pos[0], robot_base_y=model.base_pos[1],
+                               robot_base_z=model.base_pos[2], physics_enabled=False)
     except BaseException:
         owner.shutdown(wait=False)
         raise
@@ -264,6 +302,10 @@ async def advance_virtual(call, model, duration, skill, state, args, stop, progr
     try:
         if skill == "observe":
             state.kinematics = await call(model.read)
+            if hasattr(model, "manipulation"):
+                model_state = await call(model.manipulation.snapshot)
+                state.objects, state.held = model_state["objects"], model_state["held"]
+                state.facts.update(model_state["facts"])
             state.version += 1
             return state.kinematics["valid"]
         count = max(2, round(duration / 0.02) + 1)
@@ -285,6 +327,10 @@ async def advance_virtual(call, model, duration, skill, state, args, stop, progr
             state.kinematics = await call(model.step, index)
             if state.held is not None:
                 state.objects[state.held] = await call(model.object_data, state.held)
+            if hasattr(model, "manipulation"):
+                from wrs_agent.env.kitchen_actions import publish
+
+                publish(state, await call(model.manipulation.snapshot))
             state.version += 1
             if stop.is_set():
                 return False
@@ -319,7 +365,20 @@ async def make_wrs_environment(journal_path, *, duration=0.4, scene=None, allow_
         for name in ROBOT_SKILLS
     ]
     unsupported = dict(UNSUPPORTED)
-    if scene is not None:
+    if getattr(model, "profile", None) == "fafu":
+        from wrs_agent.env.kitchen_actions import install_actions
+
+        try:
+            skills = await install_actions(call, model, state, duration)
+        except BaseException:
+            await close()
+            raise
+        for entry in skills:
+            unsupported.pop(entry.name, None)
+        unsupported["collision_planning"] = (
+            "Kitchen paths validate IK and calibrated contacts; "
+            "full collision planning is unavailable.")
+    elif scene is not None:
         # Without configured objects there is nothing to grasp or place onto.
         from wrs_agent.env import wrs_pick
 
@@ -356,25 +415,15 @@ async def make_wrs_environment(journal_path, *, duration=0.4, scene=None, allow_
 def probe_virtual():
     from importlib.metadata import version
 
-    wrs = load_wrs()
-    robot, gripper = wrs.ur_ur7e.ur7e_with_gripper()
-    transforms = robot.fk()
+    model = VirtualModel()
     return {
         "import": "PASS",
-        "dependencies": {
-            name: version(name) for name in ("numpy", "scipy", "mujoco", "wgpu", "websockets")
-        },
-        "module": wrs.__file__,
-        "robot_class": type(robot).__name__,
-        "gripper_class": type(gripper).__name__,
-        "gripper_jaw_range": gripper.jaw_range.tolist(),
-        "fk_shape": list(transforms.shape),
-        "qs": robot.qs.tolist(),
-        "tcp_name": "flange",
-        "tcp_pos": robot.tcp("flange").pos.tolist(),
-        "tcp_rotmat": robot.tcp("flange").rotmat.tolist(),
-        "hardware": False,
-        "virtual_runtime_adapter": "wrs_ik_fk",
+        "dependencies": {name: version(name) for name in
+                         ("numpy", "scipy", "mujoco", "wgpu", "websockets")},
+        "module": model.wrs.__file__, "robot_class": type(model.robot).__name__,
+        "gripper_class": type(model.gripper).__name__, "hardware": False,
+        "virtual_runtime_adapter": "ur7e_ik_fk",
+        "fk_shape": list(model.robot.gl_lnk_tfarr.shape), **model.read(),
     }
 
 

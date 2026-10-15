@@ -25,3 +25,32 @@ WRS 虚拟节点提供观察、命名姿态和 `move_relative`。相对移动以
 煮面示例：`pick(strainer)` → `reorient(strainer, upright)` → `seat_in(strainer, pot)` → `pick(noodles)` → `seat_in(noodles, strainer)`，后一步依赖前一步。
 `set_control` 开关灶具，执行时夹爪必须为空。
 `pour`、`stir`、`scoop`、`shake_off` 是示教动作，只在节点提供时使用，不能用 `move_relative` 拼出来。
+
+## FAFU 原厨房适配
+
+加载原厨房 mesh 场景后，节点使用原 FAFU 模型，并提供经过该组资产标定的
+`pick/reorient/place_on/seat_in/hold_in/pour`。对象名从最新观测取；不能假设为
+`strainer/noodles`，原场景使用 `skimmer/plate_block`，也支持按观测中的名称调用。
+未标定的物体或物体组合会明确失败，不从外形名称推测抓取点。
+
+`pick` 对面块夹住中心，对漏勺夹住原把手；必须先闭爪、验证几何接触，再提起。
+`reorient(..., orientation="upright")` 扶正漏勺并保持抓持。
+`place_on(..., placement="working")` 把漏勺放在已标定工作位，释放并撤离；
+`placement="initial"` 将它恢复原位置和原横放姿态。默认 `center` 为表面中心。
+只有物体/表面组合已标定时才可选择这些放置方式。
+
+`seat_in(object, container)` 放入后释放；`hold_in(object, container, seconds=10)`
+持物入容器并保持指定墙钟时间，结束仍握住。持稳等待期间占用 arm；速度参数
+不缩短等待。计时完成不代表温度或熟度验证。
+`pour(source, target)` 使用原厨房验证过的参数化倾倒轨迹，倒出内容物后扶正并
+保持抓持；随后由 `place_on` 归位。这里的轨迹是程序标定，尚无实机示教采集。
+
+动作 `motion_speed` 可选 0.25–3，默认 1；原 DH50 方块抓放也接受该参数。
+普通 UR7E 方块场景仍只支持 `place_on` 的默认 `center`，不支持厨房放置位。
+`reset_scene` 仅用于显式恢复仿真初始状态。关闭页面不会取消任务。
+中途停止保留关节、夹爪间距、物体位姿和持有状态；复位后再运行整套演示。
+
+煮面是一份由 Runtime 执行的九步计划，定义在 `wrs_agent/recipes/noodles.py`；
+节点不注册 `cook_noodles` 等整套业务动作，规划器可以单独组合上述基础技能。
+本适配验证 IK/关节限位、抓取几何及结果位姿；完整环境碰撞规划、接触力和热学
+尚未实现。UR7E 的原方块 `pick/place_on` 保留原 WRS 碰撞规划。

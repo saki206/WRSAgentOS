@@ -2,6 +2,17 @@
 
 Zenoh 上的轻量机器人 Agent Runtime。模型提出计划，Runtime 检查和调度，动作节点负责实际执行与停止确认。默认使用独立进程的 Mock 机器人、Mock TTS、Agent 和 Voice；WRS 提供 UR7E 虚拟运动适配。
 
+## 原厨房 · 通用技能组合
+
+本分支以搭档 `design` 的代码、合同、Runtime 和看板为基础，结合最新原 FAFU
+厨房场景，实现 **夹面入网 → 持网入锅等待 10 秒 → 倒回原盘 → 漏勺归位**。
+通过 `pick/reorient/place_on/seat_in/hold_in/pour` 九个步骤组合执行，保留原八物体、
+原夹指开合、停止和复位，原 UR7E 方块抓放继续可用。
+
+安装 WRS 依赖后运行 `./scripts/run.ps1 examples/wrs/17_start_cooking_node.py`，
+打开 [控制看板](http://127.0.0.1:8014/) 或 [原厨房画面](http://127.0.0.1:8004/)。
+完整安装、合同、九步流程和验证边界见 [组合煮面说明](docs/COMPOSABLE_COOKING.md)。
+
 ## 先跑一个动作
 
 ```python

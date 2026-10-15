@@ -28,6 +28,7 @@ WRS = {
 }
 # Real service/client groups are exercised together in test_developer_examples.py.
 PAIRED = {
+    "wrs/16_cook_noodles.py", "wrs/17_start_cooking_node.py",
     "wrs/05_start_node.py",
     "wrs/06_control_arm.py",
     "wrs/07_viewer.py",
@@ -45,6 +46,7 @@ LIVE = {
     "grasping/00_start_router.py", "grasping/01_start_camera.py",
     "grasping/02_start_locator.py", "grasping/03_start_fastsam.py",
     "grasping/04_start_graspnet.py", "grasping/05_start_agent.py", "grasping/06_propose_grasps.py",
+    "wrs/15_imported_kitchen.py",
     "models/01_plan.py", "models/02_execute.py",
     "voice/05_start_wrs_voice.py", "voice/06_push_to_talk.py",
     "voice/07_start_llm_voice.py", "voice/08_listen_goals.py", "voice/09_viewer.py",

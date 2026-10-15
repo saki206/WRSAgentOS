@@ -5,7 +5,7 @@ import os
 import socket
 import threading
 
-from wrs_agent.env.wrs import load_wrs, serve_viewer_hub, sync_scene_objects
+from wrs_agent.env.wrs import ROOT, display_model, load_wrs, serve_viewer_hub, sync_scene_objects
 
 
 def _port_in_use(port):
@@ -26,6 +26,7 @@ class SceneView:
         self.dashboard, self.port = dashboard, port
         self.world = None
         self._thread = None
+        self.controls = None
 
     def _status(self, state, detail):
         self.dashboard.viewer = {"state": state, "detail": detail}
@@ -38,6 +39,12 @@ class SceneView:
         self._status("starting", "正在加载 WRS 模型…")
         _bypass_proxy_for_loopback()
         try:
+            for _ in range(150):
+                if self.dashboard.robot is not None:
+                    break
+                await asyncio.sleep(.1)
+            if self.dashboard.robot is None:
+                raise RuntimeError("robot_snapshot_not_ready")
             wrs = await asyncio.to_thread(load_wrs)
             await asyncio.to_thread(self._build, wrs)
         except Exception as exc:
@@ -68,12 +75,19 @@ class SceneView:
 
     def _build(self, wrs):
         world = wrs.wvw.World(
-            cam_pos=(1.8, 1.4, 1.2), cam_lookat_pos=(0.3, 0, 0.35),
+            cam_pos=(1.65, -1.85, 1.55) if self.dashboard.robot.data.facts.get("robot_model")
+            == "fafu_baseV1" else (1.8, 1.4, 1.2), cam_lookat_pos=(0.3, 0, 0.35),
             port=self.port, hz=10, auto_start_hub=False,
         )
         world.set_caption("WRS-Agent · UI 节点")
-        robot, gripper = wrs.ur_ur7e.ur7e_with_gripper()
-        robot.add_to_scene(world.scene)
+        model = display_model(self.dashboard.robot)
+        model.robot.add_to_scene(world.scene)
+        if self.dashboard.robot.data.facts.get("manipulation_profile"):
+            from wrs_agent.env.recipe_viewer import CookingControls
+
+            self.controls = CookingControls(world, self.dashboard.info["endpoint"],
+                                            self.dashboard.info["env_id"],
+                                            ROOT / "examples/wrs/bindings.toml")
         wrs.wssop.frame().add_to_scene(world.scene)
         displayed = {}
         board = self.dashboard
@@ -86,10 +100,10 @@ class SceneView:
             try:
                 state = snapshot.data.robot.kinematics
                 if state is not None and state.valid:
-                    robot.fk(state.qs)
-                    if state.gripper_width is not None:
-                        gripper.set_opening(state.gripper_width)
+                    model.sync(state.qs, state.gripper_width)
                 sync_scene_objects(wrs, world.scene, snapshot.data.objects, displayed)
+                if self.controls is not None:
+                    self.controls.update(snapshot)
             except Exception as exc:
                 self._status("failed", f"画面刷新失败：{type(exc).__name__}: {exc}")
 
@@ -101,3 +115,5 @@ class SceneView:
             self.world.close()
         if self._thread is not None:
             await asyncio.to_thread(self._thread.join, 2)
+        if self.controls is not None:
+            await asyncio.to_thread(self.controls.close)

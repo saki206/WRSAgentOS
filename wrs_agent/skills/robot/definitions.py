@@ -30,7 +30,11 @@ class GripperArgs(Boundary):
     command: Literal["open", "close"]
 
 
-class PickArgs(Boundary):
+class MotionArgs(Boundary):
+    motion_speed: float = Field(default=1.0, ge=0.25, le=3.0)
+
+
+class PickArgs(MotionArgs):
     object: Name
 
 
@@ -44,11 +48,12 @@ def _distinct(*values):
 
 
 class ReorientArgs(PickArgs):
-    orientation: Literal["upright", "upside_down"]
+    orientation: Literal["upright", "upside_down", "initial"]
 
 
 class PlaceOnArgs(PickArgs):
     surface: Name
+    placement: Literal["center", "working", "initial"] = "center"
 
     @model_validator(mode="after")
     def distinct_objects(self):
@@ -70,7 +75,7 @@ class ControlArgs(Boundary):
     state: Literal["on", "off"]
 
 
-class PourArgs(Boundary):
+class PourArgs(MotionArgs):
     source: Name
     target: Name
 
@@ -99,6 +104,10 @@ class ScoopArgs(Boundary):
     def distinct_objects(self):
         _distinct(self.tool, self.source, self.target)
         return self
+
+
+class HoldInArgs(SeatInArgs):
+    seconds: float = Field(default=10.0, ge=0.1, le=120.0)
 
 
 _GUIDE = files(__package__).joinpath("SKILL.md").read_text(encoding="utf-8")
@@ -196,6 +205,18 @@ SKILLS = {
             "Lower the held object through an observed container's opening and release it "
             "inside, not on the rim: strainer into pot, noodles into strainer, lid onto pot",
             preconditions=("object_held", "container_visible", "container_upright"),
+        ),
+        _skill(
+            "hold_in", HoldInArgs,
+            "Lower the held object into a calibrated container and keep holding it for "
+            "the requested wall-clock seconds. No release; timed waiting is not a thermal check.",
+            preconditions=("object_held", "container_visible", "container_upright"),
+            timeout=300.0,
+        ),
+        _skill(
+            "reset_scene", Empty,
+            "Explicitly reset a stopped virtual scene and robot to their recorded initial poses.",
+            preconditions=("simulation_only",), timeout=30.0,
         ),
         _skill(
             "set_control",

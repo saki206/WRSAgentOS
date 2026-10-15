@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 from wrs_agent.schemas import TERMINAL, ActionState, ActionStatus
@@ -14,7 +15,7 @@ class Journal:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = str(path)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="intent-journal")
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS actions "
                 "(id TEXT PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL)"
@@ -40,7 +41,7 @@ class Journal:
 
     async def save(self, request, status):
         def write():
-            with sqlite3.connect(self.path, timeout=2) as db:
+            with closing(sqlite3.connect(self.path, timeout=2)) as db, db:
                 db.execute(
                     "INSERT INTO actions VALUES (?, ?, ?) "
                     "ON CONFLICT(id) DO UPDATE SET status=excluded.status",

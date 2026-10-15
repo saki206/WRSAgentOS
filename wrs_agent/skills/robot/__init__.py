@@ -4,6 +4,8 @@ from wrs_agent.skills.robot.definitions import (
     SKILLS,
     ControlArgs,
     GripperArgs,
+    HoldInArgs,
+    MotionArgs,
     MoveArgs,
     PickArgs,
     PlaceArgs,
@@ -19,5 +21,5 @@ from wrs_agent.skills.robot.definitions import (
 __all__ = [
     "SKILLS", "ControlArgs", "GripperArgs", "MoveArgs", "PickArgs", "PlaceArgs",
     "PlaceOnArgs", "PourArgs", "RelativeMoveArgs", "ReorientArgs", "ScoopArgs",
-    "SeatInArgs", "StirArgs",
+    "SeatInArgs", "StirArgs", "MotionArgs", "HoldInArgs",
 ]

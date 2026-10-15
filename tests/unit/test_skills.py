@@ -73,7 +73,7 @@ def test_gripper_contract_accepts_only_open_or_close_and_denies_grasp_claims():
     ],
 )
 def test_cooking_contracts_take_observed_names_only(skill, args):
-    assert validate_skill(skill, 1, args, registry=SKILLS).model_dump() == args
+    assert validate_skill(skill, 1, args, registry=SKILLS).model_dump(exclude_unset=True) == args
     for extra in ({"x": 0.1}, {"pose": "home"}):
         with pytest.raises(AgentError, match="invalid_arguments"):
             validate_skill(skill, 1, {**args, **extra}, registry=SKILLS)

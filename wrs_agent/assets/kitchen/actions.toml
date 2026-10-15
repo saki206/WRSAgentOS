@@ -1,0 +1,43 @@
+# Calibration metadata for the unchanged kitchen meshes. Coordinates are local meters.
+# Object IDs are discovered by asset; renaming an observed object does not change skills.
+[profiles.food]
+asset = "kitchen/meshes/plate_block.stl"
+kind = "food"
+grasp_pos = [0.0, 0.0, 0.0]
+grasp_rpy = [0.0, 90.0, 0.0]
+opening = 0.060
+approach_opening = 0.086
+half_height = 0.015
+radius = 0.059
+
+[profiles.strainer]
+asset = "kitchen/meshes/skimmer.stl"
+kind = "strainer"
+grasp_pos = [-0.0675, -0.06, 0.07]
+grasp_rpy = [90.0, 20.0, 0.0]
+opening = 0.02447608876694598
+approach_opening = 0.040
+upright_rpy = [-90.0, 0.0, 0.0]
+bottom = [0.0, 0.17, 0.07]
+rim = [0.0, 0.0, 0.07]
+opening_axis = [0.0, -1.0, 0.0]
+radius = 0.0755
+working_offset = [0.05, 0.03, 0.0]
+contact_axis = 2
+contact_bounds = [0.0585, 0.0815]
+contact_x_bounds = [-0.0755, -0.0595]
+
+[profiles.pot]
+asset = "kitchen/meshes/pot.stl"
+kind = "vessel"
+bottom = [0.0, 0.0, 0.0]
+rim = [0.0, 0.0, 0.084]
+opening_axis = [0.0, 0.0, 1.0]
+radius = 0.079
+
+[profiles.plate]
+asset = "kitchen/meshes/plate.stl"
+kind = "surface"
+bottom = [0.0, 0.0, 0.0070000887]
+opening_axis = [0.0, 0.0, 1.0]
+radius = 0.095

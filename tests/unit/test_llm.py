@@ -192,7 +192,7 @@ def test_effort_uses_each_protocol_native_field(protocol, effort, expected):
 @pytest.mark.parametrize(
     "protocol,expected",
     [
-        ("openai_chat", "required"),
+        ("openai_chat", {"type": "function", "function": {"name": "propose_plan"}}),
         ("openai_responses", "required"),
         ("anthropic_messages", {"type": "any", "disable_parallel_tool_use": True}),
     ],
