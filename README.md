@@ -9,8 +9,8 @@ Zenoh 上的轻量机器人 Agent Runtime。模型提出计划，Runtime 检查�
 通过 `pick/reorient/place_on/seat_in/hold_in/pour` 九个步骤组合执行，保留原八物体、
 原夹指开合、停止和复位，原 UR7E 方块抓放继续可用。
 
-当前 `main` 与 `feature/composable-cooking` 均维护这套组合实现，已替代旧路线 A
-的五个专用煮面 Skill。夹指保持原方向向内平移闭合，抓取点向指尖内侧加深 8 mm；
+当前 `main` 维护这套组合实现，已替代旧路线 A 的五个专用煮面 Skill。
+夹指保持原方向向内平移闭合，抓取点向指尖内侧加深 8 mm；
 同时修复抓取时物体反复重建造成的闪烁和观察器启动时的快照竞态。
 
 安装 WRS 依赖后运行 `./scripts/run.ps1 examples/wrs/17_start_cooking_node.py`，
