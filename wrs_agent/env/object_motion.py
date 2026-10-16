@@ -140,10 +140,13 @@ class Trajectory:
 
     def jaw(self, stage, width, event=None, *, compensate=True):
         center = self.tcp_tf.copy()
+        initial_offset = self.model.tool_offset(self.width)
         widths = np.linspace(self.width, width, 11)[1:]
         for i, value in enumerate(widths):
+            self.check_stop()
             self.width = float(value)
-            if compensate:
+            if compensate and not np.allclose(
+                    self.model.tool_offset(self.width), initial_offset, atol=1e-12, rtol=0):
                 self.q = self.solve(center, self.q)
             self.frames.append(Frame(stage, self.q.copy(), self.width, DT/self.speed,
                                      event if i == len(widths)-1 else None))

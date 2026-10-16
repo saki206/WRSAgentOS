@@ -6,7 +6,7 @@ import numpy as np
 from wrs_agent import step
 from wrs_agent.env.fafu_backend import FafuModel
 from wrs_agent.env.kitchen_actions import KitchenActions
-from wrs_agent.env.wrs import ROOT
+from wrs_agent.env.wrs import ROOT, sync_scene_objects
 from wrs_agent.recipes.noodles import noodle_steps
 from wrs_agent.scene import load_scene
 from wrs_agent.skills.robot import SKILLS
@@ -23,6 +23,26 @@ def main():
     assert sum(len(v.geom.fs) for v in gripper.visuals) == len(gripper.original_geometry.fs)
     assert all(np.allclose(v.loc_tf, np.eye(4)) for v in gripper.visuals)
     stationary = gripper.visuals[0].geom.vs.copy()
+    original_fingers = tuple(points.copy() for points in gripper.local_finger_vertices())
+    original_contact = model.tcp.tf.copy()
+    original_q = model.read()["qs"]
+    for width in (.060, .040, .02447608876694598, gripper.jaw_range[0], .086):
+        gripper.set_opening(float(width))
+        assert abs(gripper.width-width) < 2e-7
+        for visual, original_points, points in zip(
+                gripper.visuals[1:], original_fingers, gripper.local_finger_vertices(),
+                strict=True):
+            assert np.array_equal(visual.rotmat, np.eye(3))
+            delta = points-original_points
+            assert np.allclose(delta[:, [0, 2]], 0., atol=1e-12)
+            assert np.allclose(delta[:, 1], delta[0, 1], atol=1e-12)
+        assert np.array_equal(model.tcp.tf, original_contact)
+        assert model.read()["qs"] == original_q
+    assert controller.snapshot()["facts"]["gripper_actuation_mode"] == (
+        "original_mesh_parallel_translation")
+    viewer_scene, displayed = model.wrs.wss.Scene(), {}
+    sync_scene_objects(model.wrs, viewer_scene, controller.snapshot()["objects"], displayed)
+    rendered_bodies = {name: body for name, (_, body) in displayed.items()}
     wrist = gripper.link
     grabs = []
     planned_seconds = 0.0
@@ -41,7 +61,13 @@ def main():
         controller.start(item.skill)
         source_pick = item.skill == "pick" and not grabs
         for frame in controller.frames:
+            before_jaw_q = model.read()["qs"]
+            before_jaw_tcp = model.tcp.tf.copy()
             controller.tick()
+            if frame.stage in {"调整接近间距", "闭爪并检查接触", "松开物体", "张开夹爪"}:
+                assert model.read()["qs"] == before_jaw_q
+                assert np.allclose(model.tcp.tf, before_jaw_tcp, atol=1e-12)
+                assert all(np.array_equal(v.rotmat, np.eye(3)) for v in gripper.visuals[1:])
             if frame.event and frame.event["kind"] == "grasp":
                 name = frame.event["name"]
                 profile = controller.profile(name)
@@ -49,12 +75,21 @@ def main():
                 assert np.linalg.norm(model.tcp.pos - (
                     controller.obj(name).tf @ np.r_[profile.grasp_pos, 1.])[:3]) < .0005
                 grabs.append(profile.kind)
+                # Both samples must be inside the original pads, 8 mm behind the tips.
+                local_contacts = (gripper.contact_points()-gripper.link.pos) @ gripper.link.rotmat
+                assert np.allclose(local_contacts[:, 0], .17010080790519714-.008, atol=1e-7)
+            if frame.event or controller.index % 5 == 0:
+                sync_scene_objects(model.wrs, viewer_scene, controller.snapshot()["objects"],
+                                   displayed)
+                for name, (_, rendered) in displayed.items():
+                    assert rendered is rendered_bodies[name]
+                    assert np.allclose(rendered.tf, controller.obj(name).tf, atol=1e-7)
             if source_pick:
                 if frame.stage in {"接近物体抓取点", "闭爪并检查接触", "提起已夹物体"}:
                     for visual in gripper.visuals:
                         local = visual.geom.vs @ visual.rotmat.T+visual.pos
                         world = local @ wrist.rotmat.T+wrist.pos
-                        assert world[:, 2].min() >= .002
+                        assert world[:, 2].min() >= .002, (frame.stage, float(world[:, 2].min()))
         assert controller.verify(item.skill), item.skill
         if item.skill == "seat_in":
             assert controller.held is None
@@ -100,7 +135,9 @@ def main():
         assert controller.held is None
     print(json.dumps({"result": "PASS", "renamed_ids": True, "nine_skills": True,
                       "original_geometry": True, "contacts": True, "ten_seconds_planned": True,
-                      "seat_in_releases": True, "raw_jaw_keeps_arm_fixed": True}),
+                      "seat_in_releases": True, "raw_jaw_keeps_arm_fixed": True,
+                      "parallel_translation": True, "stable_render_objects": True,
+                      "grasp_depth_mm": 8}),
           flush=True)
 
 

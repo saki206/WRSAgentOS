@@ -45,8 +45,9 @@ class SceneView:
                 await asyncio.sleep(.1)
             if self.dashboard.robot is None:
                 raise RuntimeError("robot_snapshot_not_ready")
+            initial = self.dashboard.robot
             wrs = await asyncio.to_thread(load_wrs)
-            await asyncio.to_thread(self._build, wrs)
+            await asyncio.to_thread(self._build, wrs, initial)
         except Exception as exc:
             self._status("failed", f"WRS 画面不可用：{type(exc).__name__}: {exc}")
             return
@@ -73,16 +74,16 @@ class SceneView:
             hub.cancel()
             await asyncio.gather(hub, return_exceptions=True)
 
-    def _build(self, wrs):
+    def _build(self, wrs, initial):
         world = wrs.wvw.World(
-            cam_pos=(1.65, -1.85, 1.55) if self.dashboard.robot.data.facts.get("robot_model")
+            cam_pos=(1.65, -1.85, 1.55) if initial.data.facts.get("robot_model")
             == "fafu_baseV1" else (1.8, 1.4, 1.2), cam_lookat_pos=(0.3, 0, 0.35),
             port=self.port, hz=10, auto_start_hub=False,
         )
         world.set_caption("WRS-Agent · UI 节点")
-        model = display_model(self.dashboard.robot)
+        model = display_model(initial)
         model.robot.add_to_scene(world.scene)
-        if self.dashboard.robot.data.facts.get("manipulation_profile"):
+        if initial.data.facts.get("manipulation_profile"):
             from wrs_agent.env.recipe_viewer import CookingControls
 
             self.controls = CookingControls(world, self.dashboard.info["endpoint"],

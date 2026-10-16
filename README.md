@@ -9,6 +9,10 @@ Zenoh 上的轻量机器人 Agent Runtime。模型提出计划，Runtime 检查�
 通过 `pick/reorient/place_on/seat_in/hold_in/pour` 九个步骤组合执行，保留原八物体、
 原夹指开合、停止和复位，原 UR7E 方块抓放继续可用。
 
+当前 `main` 与 `feature/composable-cooking` 均维护这套组合实现，已替代旧路线 A
+的五个专用煮面 Skill。夹指保持原方向向内平移闭合，抓取点向指尖内侧加深 8 mm；
+同时修复抓取时物体反复重建造成的闪烁和观察器启动时的快照竞态。
+
 安装 WRS 依赖后运行 `./scripts/run.ps1 examples/wrs/17_start_cooking_node.py`，
 打开 [控制看板](http://127.0.0.1:8014/) 或 [原厨房画面](http://127.0.0.1:8004/)。
 完整安装、合同、九步流程和验证边界见 [组合煮面说明](docs/COMPOSABLE_COOKING.md)。
@@ -65,7 +69,7 @@ git submodule update --init --recursive
 
 Router 使用固定版本 1.9.0，依次查找 `WRS_AGENT_ZENOHD` 指定的可执行文件、仓库 `.local/zenoh-1.9.0/`、系统 PATH。`install_router.ps1` 只安装 Windows x64 版本；其他平台需自行准备对应二进制，跨平台入口为 `python -X utf8 -S scripts/run.py`。当前仅 Windows 实际验收，Linux/macOS 未验收。
 
-具体依赖及 WRS 科学环境限制见 [DEPENDENCIES.md](docs/DEPENDENCIES.md)。唯一默认源码 submodule 是 [chenhaox/WRS2](https://github.com/chenhaox/WRS2)，固定 `2bb014b747833c2fd9345115fbe26ffb11376f20`。DimOS 等仅为设计参考，不是运行依赖。
+具体依赖及 WRS 科学环境限制见 [DEPENDENCIES.md](docs/DEPENDENCIES.md)。唯一默认源码 submodule 是 [chenhaox/WRS2](https://github.com/chenhaox/WRS2)，固定 `7815e6f110fd161fe3c3b7e6f978e5393c3cf502`。DimOS 等仅为设计参考，不是运行依赖。
 
 示例不使用参数切换场景。项目运维 CLI 仍可用 `./scripts/run.ps1 -m wrs_agent --help`；自定义节点继承 `wrs_agent.nodes.Node`，实现 setup，再由 `serve_node()` 启动；见 [节点开发与启动](docs/NODE_LAUNCH.md)。
 

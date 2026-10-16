@@ -61,12 +61,24 @@ def make_scene_object(wrs, object_id, data):
 
 
 def sync_scene_objects(wrs, scene, objects, displayed):
-    """Apply serialized objects to a local WRS scene; no remote motion."""
+    """Reuse rendered bodies for pose/evidence updates; no remote motion."""
     for name in set(displayed) - set(objects):
         displayed.pop(name)[1].remove_from_scene(scene)
     for name, data in objects.items():
         previous = displayed.get(name)
         if previous is not None and previous[0] == data:
+            continue
+        if (previous is not None and previous[0].geometry == data.geometry
+                and data.valid and data.pos is not None and data.rotmat is not None
+                and data.geometry is not None):
+            old, obj = previous
+            if old.pos != data.pos or old.rotmat != data.rotmat:
+                obj.set_pos_rotmat(pos=data.pos, rotmat=data.rotmat)
+            if old.rgb != data.rgb:
+                obj.rgb = data.rgb
+            if old.alpha != data.alpha:
+                obj.alpha = data.alpha
+            displayed[name] = (data.model_copy(deep=True), obj)
             continue
         if previous is not None:
             previous[1].remove_from_scene(scene)

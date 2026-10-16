@@ -1,40 +1,29 @@
-"""Kinematic animation of the two original FAFU mesh fingers, not hardware calibration."""
+"""Parallel translation of the original FAFU fingers, not hardware calibration."""
 
 import math
 
 import numpy as np
 
-MAX_ANGLE = math.radians(60)
-PIVOT_X = 0.10705
-LEFT_PIVOT_Y, RIGHT_PIVOT_Y = -0.0675, 0.0715
 TIP_X = 0.17010080790519714
-ARM_X, ARM_Y = TIP_X-PIVOT_X, 0.0265
+GRASP_DEPTH = 0.008
+CONTACT_X = TIP_X-GRASP_DEPTH
 MAX_OPEN = 0.086
-MIN_OPEN = RIGHT_PIVOT_Y-LEFT_PIVOT_Y-2*(
-    ARM_X*math.sin(MAX_ANGLE)+ARM_Y*math.cos(MAX_ANGLE)
-)
+# Preserve the existing opening limits while changing the simulated motion.
+MIN_OPEN = 0.00329279725011425
 
 
-def width_for_angle(angle):
-    if not math.isfinite(angle) or not 0 <= angle <= MAX_ANGLE:
-        raise ValueError("fafu_gripper_angle_out_of_range")
-    width = RIGHT_PIVOT_Y-LEFT_PIVOT_Y-2*(ARM_X*math.sin(angle)+ARM_Y*math.cos(angle))
-    return min(MAX_OPEN, max(MIN_OPEN, width))
-
-
-def angle_for_width(width):
+def closing_travel(width):
+    """Each finger moves half the reduction in opening, along local Y only."""
     if not math.isfinite(width) or not MIN_OPEN <= width <= MAX_OPEN:
         raise ValueError("fafu_gripper_width_out_of_range")
-    angle = math.asin((RIGHT_PIVOT_Y-LEFT_PIVOT_Y-width)/
-                      (2*math.hypot(ARM_X, ARM_Y)))-math.atan2(ARM_Y, ARM_X)
-    return float(np.clip(angle, 0, MAX_ANGLE))
+    return (MAX_OPEN-width)/2
 
 
 def contact_tf(width):
-    """Contact midpoint relative to the original URDF tool_link origin."""
-    angle = angle_for_width(width)
+    """Symmetric translation keeps the contact midpoint fixed relative to the hand."""
+    closing_travel(width)
     tf = np.eye(4)
-    tf[:3, 3] = [PIVOT_X+ARM_X*math.cos(angle)-ARM_Y*math.sin(angle)-0.165, 0.002, 0]
+    tf[:3, 3] = [CONTACT_X-0.165, 0.002, 0]
     return tf
 
 
@@ -103,23 +92,31 @@ class OriginalGripper:
     def contact_points(self):
         left, right = self.local_finger_vertices()
         points = []
-        for vertices, value in ((left, left[:, 1].max()), (right, right[:, 1].min())):
-            face = vertices[np.abs(vertices[:, 1]-value) < 2e-7]
-            face = face[np.abs(face[:, 0]-face[:, 0].max()) < 2e-7]
-            point = face.mean(axis=0)
-            # The inner edge extends along Z; its midpoint is the grasp sample.
-            point[2] = 0.0
-            points.append(point)
+        for visual, vertices, value in zip(
+                self.visuals[1:], (left, right),
+                (left[:, 1].max(), right[:, 1].min()), strict=True):
+            triangles = vertices[visual.geom.fs]
+            triangles = triangles[np.all(np.abs(triangles[:, :, 1]-value) < 2e-7, axis=1)]
+            # Verify the deeper sample is on an actual inner-pad triangle, not
+            # merely within the finger's bounding box or at a decorative rib.
+            origin = triangles[:, 0, [0, 2]]
+            edge_b = triangles[:, 1, [0, 2]]-origin
+            edge_c = triangles[:, 2, [0, 2]]-origin
+            det = edge_b[:, 0]*edge_c[:, 1]-edge_b[:, 1]*edge_c[:, 0]
+            delta = np.array([CONTACT_X, 0.])-origin
+            usable = np.abs(det) > 1e-12
+            u = np.zeros(len(det))
+            v = np.zeros(len(det))
+            u[usable] = (delta[:, 0]*edge_c[:, 1]-delta[:, 1]*edge_c[:, 0])[usable]/det[usable]
+            v[usable] = (edge_b[:, 0]*delta[:, 1]-edge_b[:, 1]*delta[:, 0])[usable]/det[usable]
+            if not np.any(usable & (u >= -1e-6) & (v >= -1e-6) & (u+v <= 1+1e-6)):
+                raise ValueError("fafu_inner_contact_pad_not_calibrated")
+            points.append([CONTACT_X, value, 0.])
         points = np.asarray(points)
         return points @ self.link.rotmat.T + self.link.pos
 
     def set_opening(self, width):
-        angle = angle_for_width(float(width))
-        for visual, sign, y in zip(self.visuals[1:], (1, -1),
-                                    (LEFT_PIVOT_Y, RIGHT_PIVOT_Y), strict=True):
-            a = sign*angle
-            rotation = np.array([[math.cos(a), -math.sin(a), 0],
-                                 [math.sin(a), math.cos(a), 0], [0, 0, 1]])
-            pivot = np.array([PIVOT_X, y, 0])
-            visual.set_pos_rotmat(pivot-rotation@pivot, rotation)
+        travel = closing_travel(float(width))
+        for visual, sign in zip(self.visuals[1:], (1, -1), strict=True):
+            visual.set_pos_rotmat(np.array([0., sign*travel, 0.]), np.eye(3))
         self.model.tcp.set_loc_tf(contact_tf(float(width)))

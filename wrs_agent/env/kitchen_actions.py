@@ -110,7 +110,7 @@ class KitchenActions:
                           "timed_hold_complete": self.wait_complete, "physics_enabled": False,
                           "manipulation_interrupted": self.interrupted,
                           "collision_checked": False, "thermal_verified": False,
-                          "gripper_actuation_mode": "original_mesh_rotation"}}
+                          "gripper_actuation_mode": "original_mesh_parallel_translation"}}
 
     def reset(self):
         self.held, self.attachment, self.contents, self.locations = None, None, {}, {}
