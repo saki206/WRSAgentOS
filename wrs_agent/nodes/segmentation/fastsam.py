@@ -35,12 +35,13 @@ class FastSamSegmenter:
             self.name, self.score_kind = "fastsam-box", "box_iou"
         self.confidence, self.minimum, self.margin = confidence, minimum, margin
 
-    def masks(self, rgb):
+    def masks(self, rgb, *, confidence=None):
         torch = self.torch
         try:
             result, = self.model.predict(
                 np.ascontiguousarray(rgb[:, :, ::-1]),
-                device=0 if self.device == "cuda" else "cpu", conf=self.confidence,
+                device=0 if self.device == "cuda" else "cpu",
+                conf=self.confidence if confidence is None else confidence,
                 imgsz=640, iou=.9, max_det=100, retina_masks=True, save=False, verbose=False,
             )
         except torch.cuda.OutOfMemoryError as exc:
@@ -109,3 +110,41 @@ class FastSamSegmenter:
         _, masks = self.masks(rgb)
         selected, score = select_box_mask(masks, box)
         return masks[selected].copy(), score
+
+    def segment_box_local_retry(self, rgb, box):
+        """Retry a missed part in a padded crop, then at lower confidence; fail closed."""
+        try:
+            return self.segment_box(rgb, box)
+        except ValueError as exc:
+            if str(exc) not in {"region_mask_not_found", "target_not_found"}:
+                raise
+
+        height, width = rgb.shape[:2]
+        x1, y1, x2, y2 = np.asarray(box, dtype=float)
+        if not (np.isfinite([x1, y1, x2, y2]).all()
+                and 0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+            raise ValueError("invalid_region_box")
+        pad_x, pad_y = max(40, (x2 - x1) * .8), max(30, (y2 - y1) * .25)
+        left, top = max(0, int(np.floor(x1 - pad_x))), max(0, int(np.floor(y1 - pad_y)))
+        right, bottom = min(width, int(np.ceil(x2 + pad_x))), min(height, int(np.ceil(y2 + pad_y)))
+        crop = rgb[top:bottom, left:right]
+        local_box = [x1 - left, y1 - top, x2 - left, y2 - top]
+        attempts = ((crop, local_box, self.confidence, True),
+                    (rgb, box, min(self.confidence, .25), False),
+                    (crop, local_box, min(self.confidence, .25), True))
+        for image, region, confidence, cropped in attempts:
+            try:
+                _, masks = self.masks(image, confidence=confidence)
+                selected, score = select_box_mask(masks, region)
+            except ValueError as exc:
+                if str(exc) not in {"region_mask_not_found", "target_not_found",
+                                    "region_mask_ambiguous", "too_many_segment_candidates"}:
+                    raise
+                continue
+            mask = masks[selected].copy()
+            if cropped:
+                whole = np.zeros((height, width), dtype=bool)
+                whole[top:bottom, left:right] = mask
+                mask = whole
+            return mask, score
+        raise ValueError("region_mask_not_found")
