@@ -1,6 +1,7 @@
 """One segmentation node lifecycle, with explicitly selected resident model backends."""
 
 import asyncio
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -8,21 +9,29 @@ from functools import partial
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from wrs_agent.errors import AgentError, error_info, known_error_info
 from wrs_agent.executor import ActionExecutor, SkillFailure
 from wrs_agent.nodes.camera.client import CameraClient
 from wrs_agent.nodes.node import Node
-from wrs_agent.nodes.segmentation.data import LatestSegment, SegmentData, SegmentInfo, pack_segment
+from wrs_agent.nodes.segmentation.data import (
+    LatestSegment,
+    PartProvenance,
+    SegmentData,
+    SegmentInfo,
+    pack_segment,
+)
 from wrs_agent.nodes.vision.artifacts import ArtifactCache, ArtifactRequest, artifact_owner
 from wrs_agent.nodes.vision.locations import read_location
 from wrs_agent.schemas import Boundary, Empty, Name, VisionData, new_id
-from wrs_agent.skills.vision.grasping import SEGMENT, SEGMENT_REGION, SegmentOutput
+from wrs_agent.skills.vision.grasping import SEGMENT, SEGMENT_PART, SEGMENT_REGION, SegmentOutput
+
+BOX_BACKENDS = {"fastsam-box", "fastsam-part"}
 
 
 class SegmentationOptions(Boundary):
-    backend: Literal["sam3", "fastsam", "fastsam-box"] = "sam3"
+    backend: Literal["sam3", "fastsam", "fastsam-box", "fastsam-part"] = "sam3"
     weights: Path = Field(strict=False)
     weights_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     device: Literal["cpu", "cuda"] = "cuda"
@@ -57,7 +66,7 @@ class SegmentationNode(Node):
     action_service = True
 
     def _segmenter(self):
-        if self.options.backend in {"fastsam", "fastsam-box"}:
+        if self.options.backend in BOX_BACKENDS | {"fastsam"}:
             from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
 
             return FastSamSegmenter(
@@ -71,6 +80,17 @@ class SegmentationNode(Node):
         return Sam3Segmenter(self.options.weights, self.options.weights_sha256,
                              device=self.options.device, confidence=self.options.confidence)
 
+    def _part_client(self):
+        from wrs_agent.planner.providers.part_grounding import (
+            PartGroundingClient,
+            part_model_config,
+            part_model_key,
+        )
+
+        config = part_model_config()
+        env_file = os.environ.get("WRS_PART_LLM_ENV_FILE")
+        return PartGroundingClient(config, part_model_key(config, env_file))
+
     async def setup(self):
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="segmentation")
         self.on_close(self._close_worker)
@@ -78,7 +98,12 @@ class SegmentationNode(Node):
         self.segmenter = await self.loop.run_in_executor(self.worker, self._segmenter)
         self.cache = ArtifactCache()
         self.latest_request = None
-        skill = SEGMENT_REGION if self.options.backend == "fastsam-box" else SEGMENT
+        if self.options.backend == "fastsam-part":
+            self.part_client = self._part_client()
+            self.on_close(self.part_client.aclose)
+        skill = {"fastsam-box": SEGMENT_REGION, "fastsam-part": SEGMENT_PART}.get(
+            self.options.backend, SEGMENT,
+        )
         self.actions(ActionExecutor(
             self.journal, state=SegmentationState(), skills=(skill.bind(self.segment),),
             backend=self.options.backend, features_extra={"robot_controls": False,
@@ -100,28 +125,84 @@ class SegmentationNode(Node):
             await asyncio.sleep(1)
             self.cache.expire()
 
+    async def _ground_part(self, args, location, rgb, observed_at, stop):
+        from PIL import Image
+
+        from wrs_agent.planner.grasp_part_prompts import check_box
+
+        # Keep the original camera age and reserve time for FastSAM and the next skill.
+        budget = self.cache.ttl - (time.monotonic() - observed_at) - 5
+        if budget <= 0:
+            raise AgentError("observation_stale")
+        object_box = location.object.box
+        ground = asyncio.create_task(self.part_client.ground(
+            args.goal, location.target, args.part, Image.fromarray(rgb), object_box=object_box,
+        ))
+        stopped = asyncio.create_task(stop.wait())
+        try:
+            done, _ = await asyncio.wait((ground, stopped), timeout=budget,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if stopped in done or stop.is_set():
+                return None
+            if ground not in done:
+                raise AgentError("observation_stale")
+            answer = ground.result()
+        except ValidationError:
+            raise AgentError("part_grounding_failed") from None
+        finally:
+            for task in (ground, stopped):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(ground, stopped, return_exceptions=True)
+        info = location.observation
+        box = answer.pixel_box(info.width, info.height)
+        if box is None:
+            raise AgentError("part_not_found")
+        if reason := check_box(box, rgb.shape):
+            raise AgentError(reason)
+        x1, y1, x2, y2 = object_box
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        dx, dy = (x2 - x1) / 2, (y2 - y1) / 2
+        if not (x1 - dx <= cx <= x2 + dx and y1 - dy <= cy <= y2 + dy):
+            raise AgentError("part_box_outside_object")
+        return PartProvenance(
+            name=args.part, box=box, grounding_model=self.part_client.config.model,
+        )
+
     async def segment(self, state, args, stop, progress):
         self.latest_request = None
         owner = artifact_owner(self.executor)
-        source = (self.options.locator if self.options.backend == "fastsam-box"
+        source = (self.options.locator if self.options.backend in BOX_BACKENDS
                   else self.options.camera)
         try:
             location = None
-            if self.options.backend == "fastsam-box":
+            part = None
+            if self.options.backend in BOX_BACKENDS:
                 await self.registry.refresh([self.options.locator])
                 located, age = await read_location(self.connect(self.options.locator),
                                                    args.location_id, owner.task_id)
+                observed_at = time.monotonic() - age
                 location = located.info
                 info, arrays, target = location.observation, located.arrays, location.target
-                inference = partial(self.segmenter.segment_box, arrays["rgb"], location.object.box)
+                if self.options.backend == "fastsam-part":
+                    if stop.is_set():
+                        return False
+                    part = await self._ground_part(args, location, arrays["rgb"], observed_at, stop)
+                    if part is None:
+                        return False
+                    inference = partial(self.segmenter.segment_box_local_retry, arrays["rgb"],
+                                        part.box)
+                else:
+                    inference = partial(self.segmenter.segment_box, arrays["rgb"],
+                                        location.object.box)
             else:
                 await self.registry.refresh([self.options.camera])
                 info, arrays, age = await CameraClient(self.connect(self.options.camera)).read()
+                observed_at = time.monotonic() - age
                 if age > 2:
                     raise SkillFailure("camera_stale")
                 target = args.target
                 inference = partial(self.segmenter.segment, arrays["rgb"], target, args.selection)
-            observed_at = time.monotonic() - age
             if stop.is_set():
                 return False
             mask, score = await self.loop.run_in_executor(self.worker, inference)
@@ -129,7 +210,7 @@ class SegmentationNode(Node):
                 return False
             data = SegmentData(SegmentInfo(
                 segment_id=new_id(), owner=owner, observation=info,
-                target=target, location=location,
+                target=target, location=location, part=part,
                 model=self.segmenter.name, weights_sha256=self.segmenter.sha256,
                 score_kind=self.segmenter.score_kind,
                 text_weights_sha256=getattr(self.segmenter, "text_sha256", None),

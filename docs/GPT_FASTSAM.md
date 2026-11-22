@@ -43,14 +43,19 @@ python -m scripts.check_gpt_fastsam --image "photo.jpg" --goal "把碗夹起来�
 遮盖无关人员、铭牌和屏幕。请求设置 `store: false`，服务端留存仍受服务及账号配置影响。
 OpenAI 默认滥用监控日志可能保留最多 30 天，详见 [数据控制说明](https://developers.openai.com/api/docs/guides/your-data)。
 默认只保存 JSON 和黑白掩码。传入 `--save-images` 才保存输入图与彩色叠图。
+原图文件及重新编码后的 PNG 上限分别为 16 MiB，解码像素数最多 16,777,216。
+API 响应和本地 JSON 上限为 64 KiB，超过上限的响应会在解析前中止。
 
-使用已有的、与输入图对应的定位结果离线复放时，加上 `--box-json <gpt-box.json>`，口令用于记录，两个 GPT 调用都会跳过。
+离线复放使用 `--box-json <gpt-box.json>`。程序核对输入图方向校正后的尺寸和 RGB 像素
+SHA‑256，两个 GPT 调用都会跳过。旧框没有指纹时，必须显式传入 `--allow-legacy-box`。
+结果会标记为未验证的复放，且不能用于标注评估。
 
 | 输出 | 内容 |
 | --- | --- |
 | `input.png` | 统一方向后的 RGB 输入，需 `--save-images` |
 | `grasp-part-suggestion.json` | GPT 建议的目标、首选部位、理由与条件，联机模式生成 |
-| `gpt-box.json` | 归一化定位框、状态与可见证据 |
+| `gpt-box.json` | 归一化定位框、状态、可见证据和图像指纹 |
+| `input-image.json` | 方向校正后的图像尺寸与像素指纹 |
 | `fastsam.json` | 像素坐标、匹配状态和逐轮搜索范围、置信度、候选数及选中 IoU 或拒绝原因 |
 | `fastsam-final-mask.png` | 成功时的原图尺寸黑白掩码 |
 | `fastsam-final-overlay.jpg` | 青色定位框、红色掩码的检查图，需 `--save-images` |
@@ -62,7 +67,30 @@ OpenAI 默认滥用监控日志可能保留最多 30 天，详见 [数据控制�
 ## 用独立标注评估
 
 传入 `--expected-mask <人工标注PNG>` 可在报告中得到 `expected_box_iou` 和
-`expected_mask_iou`，分别评估 GPT 框与标注外接框、预测掩码与标注掩码。标注须与方向
-校正后的图像尺寸一致，目标部位用白色标记。未选出掩码记为 0。应在未用于调整提示词的
-样本上评估。外接框 IoU 仅衡量候选与模型定位框的一致性，像素掩码 IoU 才与人工标注
-进行比较。没有独立标注时，GPT 的证据仅供人工复查，`matched` 表示候选匹配成功。
+`expected_mask_iou`，分别评估 GPT 框与标注外接框、预测掩码与标注掩码。
+标注时使用方向校正后的图像，目标部位用白色标记。为 `mask.png` 生成 `mask.png.json`，
+将当次的输入图指纹和标注文件哈希一起保存：
+
+```powershell
+$identity = Get-Content ".local/runs/bowl-01/input-image.json" -Raw | ConvertFrom-Json
+@{ image = $identity; mask_sha256 = (Get-FileHash "mask.png").Hash.ToLowerInvariant() } |
+    ConvertTo-Json -Depth 4 | Set-Content "mask.png.json" -Encoding utf8
+```
+
+使用未参与提示词调试的样本。未选出掩码时，掩码 IoU 为 0。没有独立标注时，
+GPT 的证据供人工复查，`matched` 表示候选与框匹配。
+
+## 实时 RGB-D 链路
+
+按[抓取示例](../examples/grasping/README.md)启动 00–05。启动 03 前，在它的进程环境中
+设置 `WRS_PART_GROUNDING=1`，并设置 `OPENAI_API_KEY`，或将
+`WRS_PART_LLM_ENV_FILE` 指向本地密钥文件。该模式使用 GPT‑6.2 Sol 中档推理，
+会将定位节点保留的一帧 RGB 发送给 OpenAI。深度、点云和掩码留在本机。
+
+为运行 06 的进程配置相同的凭据，并设置 `WRS_GRASP_GOAL`，例如
+`把碗夹起来，抓把手`。06 从口令取得物体名和首选部位，再提交
+`locate_object → segment_part → infer_grasps`。分割节点复用定位保留的 RGB、深度和 XYZ，
+在同一像素网格上产生掩码，并通过标准 `segment_id` 交给 GraspNet。
+
+节点沿用 30 秒观测有效期，并给分割及下游读取预留 5 秒。定位超时、结果歧义或帧过期时，
+本次任务会失败。06 会输出观测 ID、分割 ID 和三维抓姿候选。

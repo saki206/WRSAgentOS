@@ -17,12 +17,13 @@ from wrs_agent.schemas import Plan, Step, TaskCancelRequest, TaskRequest, new_id
 pytestmark = pytest.mark.zenoh
 
 
-def preparation(target="box", *, region=False):
+def preparation(target="box", *, region=False, part=False, goal="Lift the cup by its handle"):
     locate = []
     segment = Step(step_id="segment", skill="segment_object", args={"target": target})
     if region:
         locate = [Step(step_id="locate", skill="locate_object", args={"target": target})]
-        segment = Step(step_id="segment", skill="segment_region", depends_on=["locate"],
+        segment = Step(step_id="segment", skill="segment_part" if part else "segment_region",
+                       args={"part": "handle", "goal": goal} if part else {}, depends_on=["locate"],
                        inputs={"location_id": {"step_id": "locate", "field": "location_id"}})
     return Plan(steps=[*locate, segment,
         Step(step_id="grasps", skill="infer_grasps", depends_on=["segment"],
@@ -30,9 +31,12 @@ def preparation(target="box", *, region=False):
     ])
 
 
-@pytest.mark.parametrize("segmentation", ["sam3", "segmentation", "segmentation-box"])
+@pytest.mark.parametrize(
+    "segmentation", ["sam3", "segmentation", "segmentation-box", "segmentation-part"],
+)
 async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monkeypatch):
-    region = segmentation == "segmentation-box"
+    part = segmentation == "segmentation-part"
+    region = segmentation in {"segmentation-box", "segmentation-part"}
     target = "cup" if region else "box"
     async with LocalStack(duration=.03) as stack:
         monkeypatch.setenv("WRS_AGENT_TOKEN", stack.token)
@@ -48,8 +52,8 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
         registry = stack.system.registry
         for kind in ("camera", segmentation, "graspnet"):
             await registry.wait_for(kind, timeout=10)
-        skills = {"segment_region" if region else "segment_object": segmentation,
-                  "infer_grasps": "graspnet"}
+        segment_skill = "segment_part" if part else "segment_region" if region else "segment_object"
+        skills = {segment_skill: segmentation, "infer_grasps": "graspnet"}
         if region:
             skills["locate_object"] = "yolo"
         runtime = Runtime(stack.system.clients, skills, registry=registry)
@@ -65,7 +69,8 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
                 assert failed["error"]["code"] == "artifact_type_mismatch"
                 assert not runtime.action_history  # Reject using contracts fetched over Zenoh.
             receipt = await runtime.start(TaskRequest(request_id=new_id(),
-                                                       plan=preparation(target, region=region)))
+                                                       plan=preparation(target, region=region,
+                                                                        part=part)))
             result = await eventually(runtime.snapshot,
                                       lambda s: s["state"] in {"SUCCEEDED", "FAILED"}, timeout=8)
             assert result["state"] == "SUCCEEDED", result
@@ -87,6 +92,15 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
                 assert location.observation == data.info.segment.observation
                 assert location.owner.task_id == receipt["task_id"]
                 assert data.info.segment.score_kind == "box_iou"
+            if part:
+                assert data.info.segment.part.name == "handle"
+                assert data.info.segment.part.grounding_model == "gpt-6.2-sol"
+                assert data.info.segment.segment_id == (
+                    result["step_outputs"]["segment"]["segment_id"]
+                )
+                assert data.info.segment.observation.observation_id == (
+                    result["step_outputs"]["locate"]["observation_id"]
+                )
             latest, _, _ = await CameraClient(registry.transport("camera")).read()
             assert latest.observation_id != output["observation_id"]
             ui = CameraPreview(endpoint=stack.endpoint, env_id=stack.env_id,
@@ -109,8 +123,11 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
                 assert mask["segmentation"].startswith("data:image/jpeg;base64,")
                 assert mask["pixel_count"] == data.segment.info.pixel_count
                 if region:
-                    bad_location = Plan(steps=[Step(step_id="reuse", skill="segment_region",
-                                                    args={"location_id": location.location_id})])
+                    bad_args = {"location_id": location.location_id}
+                    if part:
+                        bad_args.update(part="handle", goal="Lift the cup by its handle")
+                    bad_location = Plan(steps=[Step(step_id="reuse", skill=segment_skill,
+                                                    args=bad_args)])
                     await runtime.start(TaskRequest(request_id=new_id(), plan=bad_location))
                     failed = await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
                     assert failed["error"]["code"] == "artifact_task_mismatch"
@@ -118,7 +135,7 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
                     assert ui.latest["segmentation"]["state"] != "ready"
                     assert "segmentation" not in ui.latest["segmentation"]
                 replacement = await runtime.start(TaskRequest(
-                    request_id=new_id(), plan=preparation(target, region=region),
+                    request_id=new_id(), plan=preparation(target, region=region, part=part),
                 ))
                 fresh = await eventually(runtime.snapshot,
                                          lambda s: s["state"] in {"SUCCEEDED", "FAILED"}, timeout=8)
@@ -139,13 +156,23 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
                                         args={"segment_id": data.info.segment.segment_id})])
             await runtime.start(TaskRequest(request_id=new_id(), plan=bad_plan))
             await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
+            if part:
+                await runtime.start(TaskRequest(
+                    request_id=new_id(),
+                    plan=preparation(target, region=True, part=True, goal="missing handle"),
+                ))
+                failed = await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
+                assert failed["error"]["code"] == "part_not_found"
+                assert runtime.action_history[-1]["skill"] == "segment_part"
             await runtime.start(TaskRequest(request_id=new_id(),
-                                             plan=preparation("ambiguous", region=region)))
+                                             plan=preparation("ambiguous", region=region,
+                                                              part=part)))
             await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
             first_skill = "locate_object" if region else "segment_object"
             assert runtime.action_history[-1]["skill"] == first_skill
             cancelled = await runtime.start(TaskRequest(request_id=new_id(),
-                                                         plan=preparation(target, region=region)))
+                                                         plan=preparation(target, region=region,
+                                                                          part=part)))
             await eventually(runtime.snapshot, lambda s: bool(s["active_actions"]))
             await runtime.cancel(TaskCancelRequest(request_id=new_id(),
                                                    task_id=cancelled["task_id"]))
@@ -154,18 +181,18 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
             assert runtime.action_history[-1]["skill"] == first_skill
             if region:
                 cancelled = await runtime.start(TaskRequest(
-                    request_id=new_id(), plan=preparation(target, region=True),
+                    request_id=new_id(), plan=preparation(target, region=True, part=part),
                 ))
                 await eventually(
                     runtime.snapshot,
                     lambda s: bool(s["active_actions"])
-                    and runtime.action_history[-1]["skill"] == "segment_region",
+                    and runtime.action_history[-1]["skill"] == segment_skill,
                 )
                 await runtime.cancel(TaskCancelRequest(request_id=new_id(),
                                                        task_id=cancelled["task_id"]))
                 await eventually(runtime.snapshot, lambda s: s["state"] == "CANCELLED")
                 await asyncio.sleep(.4)
-                assert runtime.action_history[-1]["skill"] == "segment_region"
+                assert runtime.action_history[-1]["skill"] == segment_skill
         finally:
             await runtime.close()
 

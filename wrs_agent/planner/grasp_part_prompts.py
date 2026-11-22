@@ -75,7 +75,7 @@ class PreferredPart(Boundary):
 
 
 class GraspPartSuggestion(Boundary):
-    object: str = Field(min_length=1, max_length=80)
+    object: str = Field(min_length=1, max_length=64)
     action: str = Field(min_length=1, max_length=80)
     preferred_parts: list[PreferredPart] = Field(min_length=1, max_length=1)
     avoid_parts: list[str] = Field(default_factory=list, max_length=5)
@@ -159,3 +159,12 @@ class PartBox(Boundary):
         return [value * size / 999 for value, size in zip(
             self.box, (width, height, width, height), strict=True,
         )]
+
+
+def check_box(box, shape, minimum=2, max_fraction=1):
+    x1, y1, x2, y2 = box
+    if min(x2 - x1, y2 - y1) < minimum:
+        return "part_box_too_small"
+    if (x2 - x1) * (y2 - y1) > max_fraction * shape[0] * shape[1]:
+        return "part_box_area_exceeded"
+    return None

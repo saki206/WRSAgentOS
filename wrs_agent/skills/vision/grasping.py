@@ -38,6 +38,11 @@ class RegionArgs(Boundary):
     location_id: LocationId
 
 
+class PartRegionArgs(RegionArgs):
+    part: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9 _-]*$")
+    goal: str = Field(min_length=1, max_length=1024)
+
+
 class InferGraspsArgs(Boundary):
     segment_id: SegmentId
 
@@ -89,11 +94,21 @@ SEGMENT_REGION = Skill(
     verification="mask_bound_to_location_and_observation",
 )
 
+SEGMENT_PART = Skill(
+    name="segment_part", arguments=PartRegionArgs, output=SegmentOutput,
+    result_parameters=("location_id",), resources=("segmentation",), timeout=30,
+    description="Locate and segment a requested part in the retained RGB-D observation.",
+    instructions="Bind location_id to locate_object output in the same task. "
+                 "Use the requested part or the single part proposed for the user's goal. "
+                 "Pass the returned segment_id to infer_grasps.",
+    verification="part_mask_bound_to_location_and_observation",
+)
+
 INFER_GRASPS = Skill(
     name="infer_grasps", arguments=InferGraspsArgs, output=GraspsOutput,
     result_parameters=("segment_id",), resources=("grasp_inference",), timeout=30,
     description="Propose grasp poses from the selected object's same-frame XYZ.",
-    instructions="Bind segment_id to segment_object or segment_region output in the same task. "
+    instructions="Bind segment_id to segment_object, segment_region, or segment_part in one task. "
                  "Consume the returned candidate_set_id before calling infer_grasps again; "
                  "starting a new inference discards the previous candidate set. "
                  "Candidates are proposals, not a successful grasp or a motion authorization. "

@@ -2,28 +2,75 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
-import os
+import struct
 from importlib.resources import files
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
-from wrs_agent.planner.grasp_part_prompts import (
-    PART_SCHEMA,
-    SYSTEM_PROMPT,
-    GraspPartSuggestion,
-    PartBox,
-    grounding_prompt,
+from wrs_agent.planner.grasp_part_prompts import PartBox, check_box
+from wrs_agent.planner.providers.part_grounding import (
+    DEFAULT_MODEL,
+    DEFAULT_URL,
+    MAX_IMAGE_BYTES,
+    check_image_size,
+    part_model_key,
 )
+from wrs_agent.planner.providers.wire import LLMError
+from wrs_agent.schemas import MAX_BYTES, Boundary
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = "gpt-6.2-sol"
-DEFAULT_URL = "https://api.openai.com/v1"
+
+
+class ImageIdentity(Boundary):
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class BoundPartBox(PartBox):
+    image: ImageIdentity
+
+
+class AnnotationIdentity(Boundary):
+    image: ImageIdentity
+    mask_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+def image_identity(rgb):
+    height, width = rgb.shape[:2]
+    digest = hashlib.sha256(struct.pack(">II", width, height))
+    digest.update(memoryview(rgb).cast("B"))
+    return ImageIdentity(width=width, height=height, sha256=digest.hexdigest())
+
+
+def read_limited(path, limit):
+    with path.open("rb") as source:
+        data = source.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("local file exceeds the size limit")
+    return data
+
+
+def read_json_file(path):
+    return read_limited(path, MAX_BYTES).decode("utf-8-sig")
+
+
+def replay_box(path, identity, allow_legacy):
+    raw = read_json_file(path)
+    if allow_legacy and "image" not in json.loads(raw):
+        return PartBox.model_validate_json(raw), False
+    box = BoundPartBox.model_validate_json(raw)
+    if box.image != identity:
+        raise ValueError("replay image fingerprint mismatch")
+    return box, True
 
 
 def write_json(path, data):
@@ -33,13 +80,9 @@ def write_json(path, data):
 def model_settings(args, parser):
     from wrs_agent.planner.providers.llm import LLMConfig
 
-    settings = {}
     if args.env_file is not None:
-        from dotenv import dotenv_values
-
         if not args.env_file.is_file():
             parser.error("--env-file must point to an existing file")
-        settings = dotenv_values(args.env_file, encoding="utf-8-sig", interpolate=False)
     effort = args.reasoning_effort
     if effort is None and args.model == DEFAULT_MODEL:
         effort = "medium"
@@ -52,14 +95,10 @@ def model_settings(args, parser):
     except ValidationError as exc:
         field = exc.errors(include_input=False)[0]["loc"][0]
         parser.error(f"invalid model configuration: {field}")
-    # Custom endpoints receive only their explicitly configured provider credential.
-    key_name = "OPENAI_API_KEY" if config.base_url == DEFAULT_URL else "LLM_API_KEY"
-    key = os.environ.get(key_name) or settings.get(key_name)
-    if not key and config.local:
-        return config, ""
-    if not key or not key.isascii() or not key.isprintable() or " " in key:
-        parser.error(f"set {key_name} or provide it via --env-file")
-    return config, key
+    try:
+        return config, part_model_key(config, args.env_file)
+    except LLMError:
+        parser.error("set OPENAI_API_KEY (default endpoint) or LLM_API_KEY (custom endpoint)")
 
 
 async def locate_part(config, api_key, goal, image, out):
@@ -67,28 +106,16 @@ async def locate_part(config, api_key, goal, image, out):
 
     async with PartGroundingClient(config, api_key) as client:
         async with asyncio.timeout(config.timeout_s):
-            suggestion = GraspPartSuggestion.model_validate_json(await client.complete(
-                f"{SYSTEM_PROMPT}\nUser command: {goal}", PART_SCHEMA, name="grasp_part_suggestion",
-            ))
+            suggestion = await client.suggest(goal)
             write_json(out / "grasp-part-suggestion.json", suggestion.model_dump())
-            prompt = grounding_prompt(goal, suggestion.object, suggestion.preferred_parts[0].part)
-            return PartBox.model_validate_json(await client.complete(
-                prompt, PartBox.model_json_schema(), name="grasp_part_box", image=image,
-            ))
+            return await client.ground(goal, suggestion.object, suggestion.preferred_parts[0].part,
+                                       image)
 
 
 def load_rgb(path):
-    with Image.open(path) as source:
+    with Image.open(BytesIO(read_limited(path, MAX_IMAGE_BYTES))) as source:
+        check_image_size(*source.size)
         return np.array(ImageOps.exif_transpose(source).convert("RGB"))
-
-
-def check_box(box, shape, minimum, max_fraction):
-    x1, y1, x2, y2 = box
-    if min(x2 - x1, y2 - y1) < minimum:
-        return "part_box_too_small"
-    if (x2 - x1) * (y2 - y1) > max_fraction * shape[0] * shape[1]:
-        return "part_box_area_exceeded"
-    return None
 
 
 def save_overlay(rgb, box, mask, path):
@@ -130,11 +157,20 @@ def segment_part(args, rgb, answer, out):
     return report, mask
 
 
-def read_expected_mask(path, shape):
-    with Image.open(path) as source:
+def read_expected_mask(path, identity):
+    annotation = AnnotationIdentity.model_validate_json(read_json_file(
+        path.with_name(path.name + ".json"),
+    ))
+    raw = read_limited(path, MAX_IMAGE_BYTES)
+    if (annotation.image != identity
+            or hashlib.sha256(raw).hexdigest() != annotation.mask_sha256):
+        raise ValueError("annotation fingerprint mismatch")
+    with Image.open(BytesIO(raw)) as source:
+        if source.size != (identity.width, identity.height):
+            raise ValueError("expected mask must match the oriented image dimensions")
         expected = np.array(source.convert("L")) > 127
-    if expected.shape != shape or not expected.any():
-        raise ValueError("expected mask must be nonempty and match the oriented image dimensions")
+    if not expected.any():
+        raise ValueError("expected mask must be nonempty")
     return expected
 
 
@@ -150,8 +186,6 @@ def expected_box_iou(box, mask):
 
 
 def main(argv=None):
-    from wrs_agent.planner.providers.wire import LLMError
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--goal", required=True)
@@ -171,6 +205,8 @@ def main(argv=None):
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument("--weights", type=Path, default=ROOT / ".local/models/fastsam/FastSAM-x.pt")
     parser.add_argument("--box-json", type=Path, help="Replay an existing gpt-box.json offline")
+    parser.add_argument("--allow-legacy-box", action="store_true",
+                        help="Allow an old unbound box without reporting verified provenance")
     parser.add_argument("--min-box-pixels", type=float, default=2)
     parser.add_argument("--max-box-fraction", type=float, default=1)
     parser.add_argument("--expected-mask", type=Path, help="Manual mask of the visible target part")
@@ -185,8 +221,16 @@ def main(argv=None):
         parser.error("invalid box size limits")
     if args.box_json is None:
         config, api_key = model_settings(args, parser)
-    rgb = load_rgb(args.image)
-    expected = read_expected_mask(args.expected_mask, rgb.shape[:2]) if args.expected_mask else None
+    if args.allow_legacy_box and (not args.box_json or args.expected_mask):
+        parser.error("--allow-legacy-box requires --box-json and cannot be used for evaluation")
+    try:
+        rgb = load_rgb(args.image)
+        identity = image_identity(rgb)
+        expected = read_expected_mask(args.expected_mask, identity) if args.expected_mask else None
+        if args.box_json:
+            answer, verified = replay_box(args.box_json, identity, args.allow_legacy_box)
+    except (OSError, ValueError, Image.DecompressionBombError):
+        parser.error("invalid image, annotation, or replay file (check size and fingerprints)")
     dest = args.output_dir.resolve()
     if dest.exists():
         parser.error("--output-dir already exists")
@@ -195,18 +239,22 @@ def main(argv=None):
         out = Path(staging) / "result"
         out.mkdir()
         try:
-            if args.box_json:
-                answer = PartBox.model_validate_json(args.box_json.read_text(encoding="utf-8-sig"))
-            else:
+            if not args.box_json:
                 answer = asyncio.run(locate_part(config, api_key, goal, Image.fromarray(rgb), out))
+                verified = True
         except TimeoutError:
             parser.exit(3, "Model request failed: llm_timeout\n")
         except LLMError as exc:
             parser.exit(3, f"Model request failed: {exc.code}\n")
         except ValidationError:
             parser.exit(3, "Invalid structured grasp-part result\n")
-        write_json(out / "gpt-box.json", answer.model_dump())
+        result = answer.model_dump(exclude={"image"})
+        if verified:
+            result["image"] = identity.model_dump()
+        write_json(out / "gpt-box.json", result)
+        write_json(out / "input-image.json", identity.model_dump())
         report, mask = segment_part(args, rgb, answer, out)
+        report["replay_image_verified"] = verified if args.box_json else None
         if expected is not None:
             report["expected_box_iou"] = expected_box_iou(report["pixel_box"], expected)
             report["expected_mask_iou"] = (

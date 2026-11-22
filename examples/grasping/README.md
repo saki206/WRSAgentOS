@@ -83,3 +83,7 @@ GraspNet 权重和源码限非商业内部研究，不能把当前配置用于�
 
 用一张本地 RGB 图和一句口令定位首选抓取部位，再用 FastSAM 输出掩码和叠图。
 API Key 配置、使用方法和输出文件见 [GPT + FastSAM](../../docs/GPT_FASTSAM.md)。
+
+启用实时部位模式时，在 03 的运行环境设置 `WRS_PART_GROUNDING=1`，在 06 的运行环境设置
+`WRS_GRASP_GOAL`，并为两进程配置 OpenAI 凭据。此时链路使用
+`locate_object → segment_part → infer_grasps`，原有框分割模式仍可独立启动。

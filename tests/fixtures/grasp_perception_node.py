@@ -1,6 +1,7 @@
 """Offline model fixtures for the production SAM and GraspNet node lifecycles."""
 
 import asyncio
+import json
 import sys
 import time
 
@@ -32,6 +33,9 @@ class FixtureSam:
         mask[y1:y2, x1:x2] = True
         return mask, .9
 
+    def segment_box_local_retry(self, rgb, box):
+        return self.segment_box(rgb, box)
+
 
 class FixtureGrasp:
     name, sha256, revision = "offline-grasp-fixture", "0" * 64, "0" * 40
@@ -46,12 +50,39 @@ class FixtureGrasp:
 
 
 class FixtureSamNode(Sam3Node):
+    def _part_client(self):
+        import httpx
+
+        from wrs_agent.planner.providers.part_grounding import (
+            PartGroundingClient,
+            part_model_config,
+        )
+
+        async def respond(request):
+            body = json.loads(request.content)
+            text, image = body["input"][0]["content"]
+            assert "cup" in text["text"] and "handle" in text["text"]
+            assert image["image_url"].startswith("data:image/png;base64,")
+            assert body["model"] == "gpt-6.2-sol" and body["reasoning"]["effort"] == "medium"
+            await asyncio.sleep(.3)
+            if "missing handle" in text["text"]:
+                result = {"box": None, "status": "part_not_visible", "evidence": "Occluded."}
+            else:
+                result = {"box": [85, 100, 190, 255], "status": "matched", "evidence": "Visible."}
+            return httpx.Response(200, json={"status": "completed", "output": [{
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": json.dumps(result)}],
+            }]})
+
+        return PartGroundingClient(part_model_config(), "offline-fixture",
+                                   transport=httpx.MockTransport(respond))
+
     def _segmenter(self):
         model = FixtureSam()
         if self.options.backend == "fastsam":
             model.name, model.score_kind = "offline-clip-fixture", "clip_cosine"
             model.text_sha256 = "1" * 64
-        if self.options.backend == "fastsam-box":
+        if self.options.backend in {"fastsam-box", "fastsam-part"}:
             model.name, model.score_kind = "offline-box-fixture", "box_iou"
         return model
 
@@ -71,5 +102,7 @@ if __name__ == "__main__":
         options.update(backend="fastsam", clip_weights="unused-clip-fixture.pt")
     if kind == "segmentation-box":
         options.update(backend="fastsam-box")
+    if kind == "segmentation-part":
+        options.update(backend="fastsam-part")
     asyncio.run(serve_node(FixtureGraspNode if kind == "graspnet" else FixtureSamNode,
                            node_id=kind, endpoint=endpoint, env_id=env_id, options=options))

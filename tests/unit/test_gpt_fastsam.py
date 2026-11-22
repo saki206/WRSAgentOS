@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 
 import httpx
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 from scripts import check_gpt_fastsam as cli
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
 from wrs_agent.planner.grasp_part_prompts import PartBox
+from wrs_agent.planner.providers import part_grounding
 from wrs_agent.planner.providers.llm import LLMConfig
 from wrs_agent.planner.providers.part_grounding import PartGroundingClient, reply_text
 from wrs_agent.planner.providers.wire import LLMError
@@ -57,6 +59,25 @@ async def test_provider_timeout_has_safe_error():
     async with PartGroundingClient(config, "fake", transport=httpx.MockTransport(handle)) as client:
         with pytest.raises(LLMError, match="llm_timeout"):
             await client.complete("Locate", {}, name="box")
+
+
+async def test_provider_rejects_oversized_response_and_upload(monkeypatch):
+    monkeypatch.setattr(part_grounding, "MAX_BYTES", 20)
+    monkeypatch.setattr(part_grounding, "MAX_IMAGE_BYTES", 10)
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, content=b" " * 21)
+
+    config = part_grounding.part_model_config()
+    async with PartGroundingClient(config, "fake", transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(LLMError, match="part_image_too_large"):
+            await client.complete("Locate", {}, name="box", image=Image.new("RGB", (4, 4)))
+        assert not calls
+        with pytest.raises(LLMError, match="llm_reply_too_large"):
+            await client.complete("Locate", {}, name="box")
+        assert len(calls) == 1
 
 
 def test_refusal_and_invalid_box_are_rejected():
@@ -128,6 +149,33 @@ def test_exif_and_output_publication(tmp_path, monkeypatch):
 
     box = tmp_path / "box.json"
     box.write_text(json.dumps({"box": None, "status": "part_not_visible", "evidence": "Occluded"}))
+    with pytest.raises(SystemExit) as error:
+        cli.main([*args, "--box-json", str(box)])
+    assert error.value.code == 2
+    result = json.loads(box.read_text())
+    result["image"] = cli.image_identity(cli.load_rgb(source)).model_dump()
+    box.write_text(json.dumps(result))
     assert cli.main([*args, "--box-json", str(box)]) == 1
-    assert json.loads((out / "fastsam.json").read_text())["status"] == "part_unverified"
+    report = json.loads((out / "fastsam.json").read_text())
+    assert report["status"] == "part_unverified" and report["replay_image_verified"] is True
     assert not (out / "input.png").exists()
+    other = tmp_path / "other.png"
+    Image.new("RGB", (20, 40), color="red").save(other)
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        cli.replay_box(box, cli.image_identity(cli.load_rgb(other)), allow_legacy=False)
+
+
+def test_annotation_binds_image_and_mask_bytes(tmp_path):
+    identity = cli.image_identity(np.zeros((8, 10, 3), dtype=np.uint8))
+    other = cli.image_identity(np.ones((8, 10, 3), dtype=np.uint8))
+    path = tmp_path / "mask.png"
+    Image.new("L", (10, 8), 255).save(path)
+    annotation = {"image": identity.model_dump(),
+                  "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    path.with_name("mask.png.json").write_text(json.dumps(annotation))
+    assert cli.read_expected_mask(path, identity).all()
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        cli.read_expected_mask(path, other)
+    Image.new("L", (10, 8), 128).save(path)
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        cli.read_expected_mask(path, identity)

@@ -15,6 +15,12 @@ from wrs_agent.nodes.vision.locations import LocationInfo
 from wrs_agent.schemas import Boundary, Name
 
 
+class PartProvenance(Boundary):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9 _-]*$")
+    box: list[float] = Field(min_length=4, max_length=4)
+    grounding_model: str = Field(min_length=1, max_length=128)
+
+
 class SegmentInfo(Boundary):
     segment_id: Name
     owner: ArtifactOwner
@@ -28,6 +34,7 @@ class SegmentInfo(Boundary):
         "sam3_presence_class"
     )
     location: LocationInfo | None = None
+    part: PartProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
     pixel_count: int = Field(gt=0, le=1920 * 1080)
 
     @model_validator(mode="after")
@@ -43,6 +50,12 @@ class SegmentInfo(Boundary):
             or self.score_kind not in {"box_iou", "fixture"}
         ):
             raise ValueError("segment_location_mismatch")
+        if self.part is not None:
+            x1, y1, x2, y2 = self.part.box
+            if (self.location is None or self.score_kind != "box_iou"
+                    or not 0 <= x1 < x2 <= self.observation.width
+                    or not 0 <= y1 < y2 <= self.observation.height):
+                raise ValueError("invalid_part_segment_provenance")
         return self
 
 

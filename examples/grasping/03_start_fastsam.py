@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from importlib.resources import files
 from pathlib import Path
 
@@ -24,9 +25,10 @@ async def main():
     if not WEIGHTS.is_file():
         raise SystemExit(f"找不到本地 FastSAM 权重：{WEIGHTS}。准备方法见 README.md。")
     use_local_token(SESSION)
+    backend = "fastsam-part" if os.environ.get("WRS_PART_GROUNDING") == "1" else "fastsam-box"
     await serve_node(
         SegmentationNode, node_id="segmentation", endpoint=ENDPOINT, env_id=ENV_ID,
-        options={"backend": "fastsam-box", "device": DEVICE, "locator": "yolo",
+        options={"backend": backend, "device": DEVICE, "locator": "yolo",
                  "weights": WEIGHTS, "weights_sha256": ASSET["sha256"],
                  "confidence": CONFIDENCE},
     )
