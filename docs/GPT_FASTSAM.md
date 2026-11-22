@@ -4,7 +4,12 @@
 
 例如，口令“夹起方盒，夹侧板”会将方盒和侧板作为视觉核实目标。
 
-FastSAM 生成候选掩码，按候选外接框与 GPT 框的 IoU 选择。整图无匹配时依次尝试外扩裁剪、降低置信度后的整图和裁剪图。初次整图匹配有歧义时直接返回失败。裁剪结果还原为原图尺寸。
+FastSAM 按候选外接框与 GPT 框的 IoU 匹配，最低 IoU 为 0.50，前两名至少相差
+0.05。默认置信度为 0.4。整图无匹配时依次尝试外扩裁剪、置信度 0.25 的整图和裁剪图。
+任意一轮遇到歧义就停止。裁剪结果还原为原图尺寸。
+
+默认要求框的宽、高各至少 2 像素。可用 `--min-box-pixels` 和
+`--max-box-fraction` 控制尺寸与占图面积比例。面积上限默认为 1，允许目标部位占据整图。
 
 ## 运行
 
@@ -22,21 +27,42 @@ OPENAI_API_KEY=your_openai_api_key
 ```
 
 ```powershell
-python -m scripts.check_gpt_fastsam --image "photo.jpg" --goal "把碗夹起来，抓把手" --env-file ".env.openai" --output-dir ".local/runs/bowl-01"
+python -m scripts.check_gpt_fastsam --image "photo.jpg" --goal "把碗夹起来，抓把手" --env-file ".env.openai" --output-dir ".local/runs/bowl-01" --save-images
 ```
 
-若已在环境变量中设置 `OPENAI_API_KEY`，可以省略 `--env-file`。脚本通过 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) 发送口令和第二阶段的图片。默认模型为 `gpt-4.1-mini`，可用 `--model` 指定具有图像输入和结构化输出能力的 OpenAI API 模型。每次指定一个新的输出目录。
+默认使用 OpenAI Responses API、`gpt-6.2-sol` 和 `medium` 推理档。两个请求共享
+120 秒时限，可用 `--timeout` 调整。可以通过 `--model`、`--base-url`、
+`--protocol`、`--reasoning-effort`、`--max-output-tokens` 和 `--proxy` 配置。
+支持 Responses 和 Chat Completions 协议，服务须支持图像输入及严格 JSON Schema。
+自定义地址使用 `LLM_API_KEY`，OpenAI 默认地址使用 `OPENAI_API_KEY`。
+环境变量优先于 `--env-file`，系统代理变量不参与请求。
+
+## 图像与留存
+
+联机定位会将经过方向校正、重新编码的整张 RGB 图发送给配置的服务。现场照片应在提交前
+遮盖无关人员、铭牌和屏幕。请求设置 `store: false`，服务端留存仍受服务及账号配置影响。
+OpenAI 默认滥用监控日志可能保留最多 30 天，详见 [数据控制说明](https://developers.openai.com/api/docs/guides/your-data)。
+默认只保存 JSON 和黑白掩码。传入 `--save-images` 才保存输入图与彩色叠图。
 
 使用已有的、与输入图对应的定位结果离线复放时，加上 `--box-json <gpt-box.json>`，口令用于记录，两个 GPT 调用都会跳过。
 
 | 输出 | 内容 |
 | --- | --- |
-| `input.png` | 统一方向后的 RGB 输入 |
+| `input.png` | 统一方向后的 RGB 输入，需 `--save-images` |
 | `grasp-part-suggestion.json` | GPT 建议的目标、首选部位、理由与条件，联机模式生成 |
-| `grounding-prompt.txt` | 本次填入目标和首选部位的视觉提示词，联机模式生成 |
 | `gpt-box.json` | 归一化定位框、状态与可见证据 |
-| `fastsam.json` | 像素坐标、匹配状态、IoU 或失败原因 |
+| `fastsam.json` | 像素坐标、匹配状态和逐轮搜索范围、置信度、候选数及选中 IoU 或拒绝原因 |
 | `fastsam-final-mask.png` | 成功时的原图尺寸黑白掩码 |
-| `fastsam-final-overlay.jpg` | 青色定位框、红色掩码的检查图 |
+| `fastsam-final-overlay.jpg` | 青色定位框、红色掩码的检查图，需 `--save-images` |
 
-退出码 0 表示成功选择掩码。退出码 1 表示部位未核实、掩码匹配失败或程序运行失败。该入口输出二维结果。
+结果完整写入临时目录后才发布至输出路径。空框、拒框或无匹配会保存完整诊断。
+退出码 0 表示选中掩码，1 表示未选中掩码或其他运行失败，2 表示命令参数或配置错误，
+3 表示模型请求失败或结构化结果无效。
+
+## 用独立标注评估
+
+传入 `--expected-mask <人工标注PNG>` 可在报告中得到 `expected_box_iou` 和
+`expected_mask_iou`，分别评估 GPT 框与标注外接框、预测掩码与标注掩码。标注须与方向
+校正后的图像尺寸一致，目标部位用白色标记。未选出掩码记为 0。应在未用于调整提示词的
+样本上评估。外接框 IoU 仅衡量候选与模型定位框的一致性，像素掩码 IoU 才与人工标注
+进行比较。没有独立标注时，GPT 的证据仅供人工复查，`matched` 表示候选匹配成功。

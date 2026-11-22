@@ -111,14 +111,8 @@ class FastSamSegmenter:
         selected, score = select_box_mask(masks, box)
         return masks[selected].copy(), score
 
-    def segment_box_local_retry(self, rgb, box):
-        """Retry a missed part in a padded crop, then at lower confidence; fail closed."""
-        try:
-            return self.segment_box(rgb, box)
-        except ValueError as exc:
-            if str(exc) not in {"region_mask_not_found", "target_not_found"}:
-                raise
-
+    def segment_box_local_retry(self, rgb, box, *, trace=None):
+        """Retry missing candidates and stop at ambiguity. Optionally record attempts."""
         height, width = rgb.shape[:2]
         x1, y1, x2, y2 = np.asarray(box, dtype=float)
         if not (np.isfinite([x1, y1, x2, y2]).all()
@@ -129,18 +123,30 @@ class FastSamSegmenter:
         right, bottom = min(width, int(np.ceil(x2 + pad_x))), min(height, int(np.ceil(y2 + pad_y)))
         crop = rgb[top:bottom, left:right]
         local_box = [x1 - left, y1 - top, x2 - left, y2 - top]
-        attempts = ((crop, local_box, self.confidence, True),
+        attempts = ((rgb, box, self.confidence, False),
+                    (crop, local_box, self.confidence, True),
                     (rgb, box, min(self.confidence, .25), False),
                     (crop, local_box, min(self.confidence, .25), True))
         for image, region, confidence, cropped in attempts:
+            attempt = {
+                "confidence": confidence,
+                "search_xyxy": [left, top, right, bottom] if cropped else [0, 0, width, height],
+                "candidate_count": None,
+            }
+            if trace is not None:
+                trace.append(attempt)
             try:
                 _, masks = self.masks(image, confidence=confidence)
+                attempt["candidate_count"] = len(masks)
                 selected, score = select_box_mask(masks, region)
             except ValueError as exc:
-                if str(exc) not in {"region_mask_not_found", "target_not_found",
-                                    "region_mask_ambiguous", "too_many_segment_candidates"}:
+                attempt["reason"] = str(exc)
+                if str(exc) == "target_not_found":
+                    attempt["candidate_count"] = 0
+                if str(exc) not in {"region_mask_not_found", "target_not_found"}:
                     raise
                 continue
+            attempt.update(selected_index=selected, box_iou=score)
             mask = masks[selected].copy()
             if cropped:
                 whole = np.zeros((height, width), dtype=bool)
