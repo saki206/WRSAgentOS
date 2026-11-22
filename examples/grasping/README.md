@@ -82,4 +82,4 @@ GraspNet 权重和源码限非商业内部研究，不能把当前配置用于�
 ## 通用指令离线分割（GPT + FastSAM）
 
 用一张本地 RGB 图和一句口令定位首选抓取部位，再用 FastSAM 输出掩码和叠图。
-使用方法、输出文件与相对上游的逐文件变更见 [GPT + FastSAM](../../docs/GPT_FASTSAM.md)。
+API Key 配置、使用方法和输出文件见 [GPT + FastSAM](../../docs/GPT_FASTSAM.md)。

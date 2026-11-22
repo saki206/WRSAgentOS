@@ -1,13 +1,15 @@
 """Run language-guided FastSAM part segmentation on a saved RGB image."""
 
 import argparse
+import base64
 import json
-import subprocess
+import os
 from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
+from pydantic import ValidationError
 
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
 from wrs_agent.planner.grasp_part_prompts import (
@@ -17,28 +19,75 @@ from wrs_agent.planner.grasp_part_prompts import (
     PartBox,
     grounding_prompt,
 )
+from wrs_agent.planner.providers import openai_responses
+from wrs_agent.planner.providers.wire import LLMError
 
 ROOT = Path(__file__).resolve().parents[1]
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 
 def write_json(path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def run_codex(model, prompt, schema, output, *, image=None):
-    schema_file = output.with_suffix(".schema.json")
-    write_json(schema_file, schema)
-    command = [
-        "codex", "exec", "--ephemeral", "--sandbox", "read-only", "--ignore-user-config",
-        "--skip-git-repo-check", "--output-schema", str(schema_file),
-        "--output-last-message", str(output), "-m", model, "-C", str(output.parent),
-    ]
+def parse_gpt_json(response):
+    try:
+        body = response.json()
+        if body["status"] != "completed":
+            raise LLMError("llm_incomplete_reply")
+        messages = [item for item in body["output"] if item["type"] == "message"]
+        message, = messages
+        parts = message["content"]
+        if message["role"] != "assistant" or any(part["type"] != "output_text" for part in parts):
+            raise LLMError("llm_invalid_reply")
+        return "".join(part["text"] for part in parts)
+    except (KeyError, TypeError, ValueError):
+        raise LLMError("llm_invalid_reply") from None
+
+
+def request_gpt(client, model, prompt, schema, *, name, image=None):
+    import httpx
+
+    content = [{"type": "input_text", "text": prompt}]
     if image is not None:
-        command.extend(["--image", str(image)])
-    command += ["--", "-"]
-    prompt += "\nUse only the supplied text and image. Do not call tools or read files."
-    subprocess.run(command, input=prompt, encoding="utf-8", check=True, timeout=300)
-    return output.read_text(encoding="utf-8")
+        encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+        content.append({
+            "type": "input_image", "image_url": f"data:image/png;base64,{encoded}",
+            "detail": "high",
+        })
+    try:
+        response = client.post(OPENAI_RESPONSES_URL, json={
+            "model": model,
+            "store": False,
+            "input": [{"role": "user", "content": content}],
+            "max_output_tokens": 2048,
+            "text": {"format": {
+                "type": "json_schema", "name": name, "strict": True, "schema": schema,
+            }},
+        })
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise SystemExit(f"OpenAI API returned HTTP {exc.response.status_code} ({name}).") from None
+    except httpx.RequestError:
+        raise SystemExit(f"OpenAI API request failed ({name}). Check the connection.") from None
+    return parse_gpt_json(response)
+
+
+def locate_with_gpt(api_key, model, goal, out):
+    import httpx
+
+    with httpx.Client(headers=openai_responses.headers(api_key), timeout=120) as client:
+        suggestion = GraspPartSuggestion.model_validate_json(request_gpt(
+            client, model, f"{SYSTEM_PROMPT}\nUser command: {goal}",
+            PART_SCHEMA, name="grasp_part_suggestion",
+        ))
+        write_json(out / "grasp-part-suggestion.json", suggestion.model_dump())
+        prompt = grounding_prompt(goal, suggestion.object, suggestion.preferred_parts[0].part)
+        (out / "grounding-prompt.txt").write_text(prompt, encoding="utf-8")
+        return PartBox.model_validate_json(request_gpt(
+            client, model, prompt, PartBox.model_json_schema(),
+            name="grasp_part_box", image=out / "input.png",
+        ))
 
 
 def save_overlay(rgb, box, mask, path):
@@ -56,7 +105,8 @@ def main():
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--output-dir", type=Path, required=True, help="New output directory")
-    parser.add_argument("--model", default="gpt-6.1-sol", help="Model available in Codex")
+    parser.add_argument("--model", default="gpt-4.1-mini", help="OpenAI API vision model")
+    parser.add_argument("--env-file", type=Path, help="Load OPENAI_API_KEY from a local .env file")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument("--weights", type=Path, default=ROOT / ".local/models/fastsam/FastSAM-x.pt")
     parser.add_argument("--box-json", type=Path, help="Replay an existing gpt-box.json offline")
@@ -64,6 +114,18 @@ def main():
     goal = args.goal.strip()
     if not goal or len(goal) > 1024:
         parser.error("--goal must contain 1 to 1024 characters")
+    if args.box_json is None:
+        if args.env_file is not None:
+            from dotenv import dotenv_values
+
+            if not args.env_file.is_file():
+                parser.error("--env-file must point to an existing file")
+            settings = dotenv_values(args.env_file, encoding="utf-8-sig", interpolate=False)
+        else:
+            settings = {}
+        api_key = os.environ.get("OPENAI_API_KEY") or settings.get("OPENAI_API_KEY")
+        if not api_key or not api_key.isascii() or not api_key.isprintable() or " " in api_key:
+            parser.error("set OPENAI_API_KEY or provide it via --env-file")
     with Image.open(args.image) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
     rgb = np.array(image)
@@ -74,19 +136,10 @@ def main():
     if args.box_json:
         answer = PartBox.model_validate_json(args.box_json.read_text(encoding="utf-8-sig"))
     else:
-        suggestion = GraspPartSuggestion.model_validate_json(run_codex(
-            args.model,
-            f"{SYSTEM_PROMPT}\nUser command: {goal}\nReturn only the specified JSON.",
-            PART_SCHEMA,
-            out / "grasp-part-suggestion.json",
-        ))
-        part = suggestion.preferred_parts[0].part
-        prompt = grounding_prompt(goal, suggestion.object, part)
-        (out / "grounding-prompt.txt").write_text(prompt, encoding="utf-8")
-        answer = PartBox.model_validate_json(run_codex(
-            args.model, prompt, PartBox.model_json_schema(), out / "gpt-box.json",
-            image=out / "input.png",
-        ))
+        try:
+            answer = locate_with_gpt(api_key, args.model, goal, out)
+        except (LLMError, ValidationError):
+            raise SystemExit("OpenAI API did not return a valid grasp-part result.") from None
     write_json(out / "gpt-box.json", answer.model_dump())
 
     box = answer.pixel_box(image.width, image.height)
