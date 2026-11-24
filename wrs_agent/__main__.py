@@ -29,6 +29,10 @@ async def main():
         "--live-model", action="store_true", default=None,
         help="Enable LLMClient using LLM_* environment variables; otherwise planning is disabled",
     )
+    parser.add_argument(
+        "--voice-part-grasp", action="store_true", default=None,
+        help="Route grasp goals through the part model; requires --live-model",
+    )
     parser.add_argument("--backend", choices=["mock", "wrs"])
     parser.add_argument("--tts-backend", choices=["mock", "qwen"])
     parser.add_argument("--tts-prepare", dest="tts_prepared_texts", action="append")

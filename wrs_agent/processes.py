@@ -79,6 +79,7 @@ class LocalStack:
         env_id=None,
         backend="mock",
         live_model=False,
+        voice_part_grasp=False,
         bindings=None,
         scene=None,
         tts_backend="mock",
@@ -92,6 +93,7 @@ class LocalStack:
         arguments = {
             "backend": backend, "duration": duration, "fault": fault, "scene": scene,
             "live_model": live_model, "tts_backend": tts_backend,
+            "voice_part_grasp": voice_part_grasp,
             "tts_prepared_texts": tts_prepared_texts, "asr_backend": asr_backend,
             "asr_script": asr_script, "asr_vocabulary": asr_vocabulary,
         }

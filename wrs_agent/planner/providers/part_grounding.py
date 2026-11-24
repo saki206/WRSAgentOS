@@ -1,26 +1,34 @@
 """Structured text and image requests for grasp part selection."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
 import os
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
-from PIL import Image
 
 from wrs_agent.planner.grasp_part_prompts import (
     PART_SCHEMA,
     SYSTEM_PROMPT,
+    VOICE_GRASP_PROMPT,
+    VOICE_GRASP_SCHEMA,
     GraspPartSuggestion,
     PartBox,
+    VoiceGraspSuggestion,
     grounding_prompt,
 )
 from wrs_agent.planner.providers import openai_chat, openai_responses
 from wrs_agent.planner.providers.llm import LLMConfig, http_transport, transport_error_code
 from wrs_agent.planner.providers.wire import LLMError
 from wrs_agent.schemas import MAX_BYTES
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 PROTOCOLS = {"openai_responses": openai_responses, "openai_chat": openai_chat}
 DEFAULT_MODEL = "gpt-6.2-sol"
@@ -72,9 +80,17 @@ def part_model_config(settings=None, **overrides):
 
 
 def part_model_key(config, settings=None):
-    """Send OpenAI credentials only to the default OpenAI endpoint."""
-    key_name = "OPENAI_API_KEY" if config.base_url == DEFAULT_URL else "LLM_API_KEY"
-    key = os.environ.get(key_name) or (settings or {}).get(key_name)
+    """Keep generic planner credentials tied to their configured API endpoint."""
+    settings = settings or {}
+    if config.base_url == DEFAULT_URL:
+        key = os.environ.get("OPENAI_API_KEY") or settings.get("OPENAI_API_KEY")
+    else:
+        key = os.environ.get("WRS_PART_LLM_API_KEY") or settings.get("WRS_PART_LLM_API_KEY")
+        file_url = settings.get("LLM_BASE_URL") or settings.get("WRS_PART_LLM_BASE_URL") or ""
+        if not key and file_url.strip().rstrip("/") == config.base_url:
+            key = settings.get("LLM_API_KEY")
+        if not key and os.environ.get("LLM_BASE_URL", "").strip().rstrip("/") == config.base_url:
+            key = os.environ.get("LLM_API_KEY")
     if not key or not key.isascii() or not key.isprintable() or " " in key:
         raise LLMError("llm_api_key_missing_or_invalid")
     return key
@@ -86,6 +102,8 @@ def check_image_size(width, height):
 
 
 def encode_image(image: Image.Image):
+    from PIL import Image
+
     # Rebuild from RGB bytes so EXIF and other source metadata stay out of the request.
     check_image_size(*image.size)
     buffer = BytesIO()
@@ -195,6 +213,13 @@ class PartGroundingClient:
     async def suggest(self, goal):
         return GraspPartSuggestion.model_validate_json(await self.complete(
             f"{SYSTEM_PROMPT}\nUser command: {goal}", PART_SCHEMA, name="grasp_part_suggestion",
+        ))
+
+    async def suggest_voice_goal(self, goal):
+        # Route and recommend the part together so a grasp still needs one text request.
+        return VoiceGraspSuggestion.model_validate_json(await self.complete(
+            f"{VOICE_GRASP_PROMPT}\n{SYSTEM_PROMPT}\nUser command: {goal}",
+            VOICE_GRASP_SCHEMA, name="voice_grasp_suggestion",
         ))
 
     async def ground(self, goal, target, part, image, *, object_box=None):

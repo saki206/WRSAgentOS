@@ -5,9 +5,10 @@ import os
 
 from examples._session import use_local_token
 from examples.grasping.settings import connection_settings
-from wrs_agent import System, step
+from wrs_agent import System
 from wrs_agent.nodes.camera.client import CameraClient
 from wrs_agent.nodes.grasp.data import read_grasps
+from wrs_agent.planner.grasp_parts import grasp_preparation_plan
 from wrs_agent.skills.vision.grasping import GraspsOutput
 
 ENDPOINT, ENV_ID, SESSION = connection_settings()
@@ -67,16 +68,8 @@ async def main():
             required = "1" if goal else "0"
             raise SystemExit(f"03 未提供 {skill}，请用 WRS_PART_GROUNDING={required} 重启 03。")
         target, part = await suggest_part(goal) if goal else (TARGET, None)
-        locate = step("locate_object", target=target, selection=SELECTION)
-        location_input = {"location_id": {"step_id": locate.step_id, "field": "location_id"}}
-        if part is not None:
-            segment = step("segment_part", after=locate, goal=goal, part=part,
-                           inputs=location_input)
-        else:
-            segment = step("segment_region", after=locate, inputs=location_input)
-        propose = step("infer_grasps", after=segment,
-                       inputs={"segment_id": {"step_id": segment.step_id, "field": "segment_id"}})
-        task = await system.start(locate, segment, propose)
+        plan = grasp_preparation_plan(target, selection=SELECTION, goal=goal, part=part)
+        task = await system.start(*plan.steps)
         result = await task.wait(timeout=90)
         print("感知任务结果：", result.state)
         if result.state != "SUCCEEDED":

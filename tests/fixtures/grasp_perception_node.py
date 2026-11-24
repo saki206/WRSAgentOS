@@ -74,7 +74,9 @@ class FixtureSamNode(Sam3Node):
                 "content": [{"type": "output_text", "text": json.dumps(result)}],
             }]})
 
-        return PartGroundingClient(part_model_config(), "offline-fixture",
+        config = part_model_config(protocol="openai_responses", model="gpt-6.2-sol",
+                                   reasoning_effort="medium")
+        return PartGroundingClient(config, "offline-fixture",
                                    transport=httpx.MockTransport(respond))
 
     def _segmenter(self):

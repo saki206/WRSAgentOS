@@ -1,6 +1,7 @@
 """终端一：启动在线模型语音任务系统；本例可产生模型费用，LLM_* 凭据来自环境。"""
 
 import asyncio
+import os
 from pathlib import Path
 
 from examples._session import use_local_token
@@ -14,6 +15,7 @@ VOCABULARY = ["机器人", "停止", "停止播报", "状态", "移动到", "初
 
 
 async def main():
+    part_grasp = os.environ.get("WRS_PART_GROUNDING") == "1"
     # 先验证配置与凭据；这里只构造/关闭客户端，不发送模型请求。
     try:
         config = LLMConfig.from_env()
@@ -30,7 +32,7 @@ async def main():
     async with LocalStack(
         backend="wrs", bindings=CONFIG, duration=4.0,
         port=7451, env_id="voice-goal",
-        live_model=True,
+        live_model=True, voice_part_grasp=part_grasp,
         tts_backend="qwen", tts_prepared_texts=[GREETING],
         asr_backend="qwen", asr_vocabulary=VOCABULARY,
     ) as stack:
@@ -47,6 +49,8 @@ async def main():
             flush=True,
         )
         print("两者都用同一支麦克风，请只运行其中一个。", flush=True)
+        if part_grasp:
+            print("语音部位模式已开启。试说“把碗夹起来”，查看抓姿候选。", flush=True)
         print("未配置在线模型时直接退出，不会改用 Mock Planner。", flush=True)
         await asyncio.Event().wait()
 

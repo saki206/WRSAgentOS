@@ -163,6 +163,31 @@ viewer 可以先于相机或 YOLO 启动，节点加入后会刷新；重启 09 
 
 ## 在主场景查看点云和抓取候选
 
+### 用语音生成指定部位的抓姿
+
+在运行 `07_start_llm_voice.py` 和 `grasping/03_start_fastsam.py` 的两个进程中设置
+`WRS_PART_GROUNDING=1`。两边都设置 `OPENAI_API_KEY`，或把
+`WRS_PART_LLM_ENV_FILE` 指向保存部位 API 凭据的本地配置文件。07 仍使用原有的
+`LLM_*` 配置处理其他目标。模型支持和默认值见 [GPT + FastSAM](../../docs/GPT_FASTSAM.md)。
+
+启动 07、`camera/01_start_camera.py`，以及 `grasping/02_start_locator.py`、
+`03_start_fastsam.py`、`04_start_graspnet.py`。后三个抓取脚本各自设置
+`WRS_GRASP_PROFILE=voice-goal`。定位节点使用 grasping 的 02 即可。
+
+09 的「按住说话」可以直接说「把碗夹起来」。使用 08 循环收音时说
+「机器人，把碗夹起来」。两种入口都将识别文字交给 Agent，由部位模型同时判断指令
+类型、推荐目标物体和部位。单物体抓取走
+`locate_object → segment_part → infer_grasps`，候选可在 09 的点云视图查看。
+指定「左边的杯子」或「右边的碗」时，方位传给 YOLO 的实例选择参数。
+未指定方位且有多个匹配时，任务会报告目标歧义。
+这个流程只计算抓姿。缺少目标或包含多步抓放的指令会提示说清单个抓取目标。
+
+启用后，普通目标文字会先发送到所配置的部位模型做路由，再按原方式交给任务 Planner。
+停止和状态查询继续走本地 Voice 通道。音频由本地 ASR 识别，视觉核实请求发送的是 RGB。
+在语音入口使用此流程时，口令来自识别结果，直接调用 06 的环境变量入口仍可独立使用。
+
+### 在查看器中查看结果
+
 升级后重启 `09_viewer.py`、刷新 8001 页面。点“点云”后，XYZ 直接画在 WRS 主场景中；
 面板只保留类型切换和说明，没有第二个点云绘制窗口。“定位点云”可将观察视角移到
 相机展示区。相机尚无外参，这个区域只是显示布局，没有与机器人配准。
@@ -183,7 +208,7 @@ viewer 可以先于相机或 YOLO 启动，节点加入后会刷新；重启 09 
 需要重新生成后及时查看。加载数量显示需重启 Agent（本组的 07）和 09；旧 Agent
 没有 step_outputs 时会提示升级，不会把缺少结果误报为 0 个候选。
 
-将 grasping 示例接入 09 时，在运行 `grasping/02_start_locator.py`、
+如需手动运行 06 并在 09 查看结果，在运行 `grasping/02_start_locator.py`、
 `03_start_fastsam.py`、`04_start_graspnet.py` 和 `06_propose_grasps.py`
 的每个终端或 IDE 运行配置里设置 `WRS_GRASP_PROFILE=voice-goal`，然后启动相应进程。
 该配置统一选择以下连接参数：
@@ -200,7 +225,9 @@ README 选择对应解释器启动 02、03、04，再运行 06 生成候选。�
 它提交固定感知计划，不需要在线模型规划。共享会话显式设置 WRS_AGENT_TOKEN 时各进程
 仍须一致；不要把口令写入代码。09 顶部 GRASP_NODE 可改节点名称，默认 graspnet。
 
-抓姿任务的正确链路是 `locate_object → segment_region → infer_grasps`：定位只产出
+启用部位模式的分割节点也提供整物体分割。整物体链路是
+`locate_object → segment_region → infer_grasps`，部位链路用
+`segment_part` 替换中间步骤。定位只产出
 `location_id`，FastSAM 才产出 `segment_id`。Runtime 会在执行任何步骤前检查结果种类；
 跳过分割、把定位或观测编号传给 GraspNet，会以 `artifact_type_mismatch` 拒绝。
 如果使用提供文字分割的节点，也可以 `segment_object → infer_grasps`。

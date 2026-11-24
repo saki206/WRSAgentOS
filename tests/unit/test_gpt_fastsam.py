@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import numpy as np
@@ -9,12 +11,67 @@ from PIL import Image
 from pydantic import ValidationError
 
 from scripts import check_gpt_fastsam as cli
+from wrs_agent.errors import AgentError
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
-from wrs_agent.planner.grasp_part_prompts import PartBox
+from wrs_agent.planner import PlanDecision, PlanRequest
+from wrs_agent.planner.grasp_part_prompts import PartBox, VoiceGraspSuggestion
+from wrs_agent.planner.grasp_parts import VoiceGraspPlanner
 from wrs_agent.planner.providers import part_grounding
 from wrs_agent.planner.providers.llm import LLMConfig
 from wrs_agent.planner.providers.part_grounding import PartGroundingClient, reply_text
 from wrs_agent.planner.providers.wire import LLMError
+
+
+async def test_voice_routes_ordinary_goals_and_clarifies_incomplete_grasps():
+    other = PlanDecision(kind="answer", text="ordinary planner")
+    base = SimpleNamespace(plan=AsyncMock(return_value=other), last_usage={"output_tokens": 4})
+    part = SimpleNamespace(suggest_voice_goal=AsyncMock())
+    planner = VoiceGraspPlanner(part, base)
+    request = PlanRequest(user_goal="向右移动", world={}, skills=[])
+    part.suggest_voice_goal.return_value = VoiceGraspSuggestion(
+        intent="other", selection="only", suggestion=None,
+    )
+    assert await planner.plan(request) is other
+    base.plan.assert_awaited_once_with(request)
+    assert planner.last_usage == {"output_tokens": 4}
+
+    base.plan.reset_mock()
+    request = request.model_copy(update={"user_goal": "夹起来"})
+    part.suggest_voice_goal.return_value = VoiceGraspSuggestion(
+        intent="clarify", selection="only", suggestion=None,
+    )
+    assert (await planner.plan(request)).kind == "clarify"
+    assert planner.last_usage == {}
+    base.plan.assert_not_awaited()
+
+
+async def test_voice_preserves_explicit_instance_and_rejects_invalid_grasp_setup():
+    part = SimpleNamespace(suggest_voice_goal=AsyncMock(
+        return_value=VoiceGraspSuggestion.model_validate({
+            "intent": "grasp", "selection": "leftmost", "suggestion": {
+                "object": "box", "action": "lift", "preferred_parts": [
+                    {"part": "side panel", "reason": "flat", "condition": "if rigid"},
+                ],
+            },
+        }),
+    ))
+    base = SimpleNamespace(plan=AsyncMock())
+    planner = VoiceGraspPlanner(part, base)
+    request = PlanRequest(user_goal="把左边的盒子夹起来", world={}, skills=[
+        {"name": "locate_object"}, {"name": "segment_region"}, {"name": "infer_grasps"},
+    ])
+    with pytest.raises(AgentError, match="part_grasp_skills_unavailable"):
+        await planner.plan(request)
+    request.skills.append({"name": "segment_part"})
+    decision = await planner.plan(request)
+    assert decision.plan.steps[0].args == {"target": "box", "selection": "leftmost"}
+    assert decision.plan.steps[1].args["part"] == "side panel"
+    with pytest.raises(ValidationError) as malformed:
+        VoiceGraspSuggestion(intent="grasp", selection="only", suggestion=None)
+    part.suggest_voice_goal.side_effect = malformed.value
+    with pytest.raises(AgentError, match="part_suggestion_invalid"):
+        await planner.plan(request)
+    base.plan.assert_not_awaited()
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat"])
@@ -204,6 +261,14 @@ def test_model_settings_are_shared_and_credentials_are_endpoint_specific(tmp_pat
     assert part_grounding.part_model_key(config, {**settings, "LLM_API_KEY": "custom-test"}) == (
         "custom-test"
     )
+    monkeypatch.setenv("LLM_API_KEY", "ordinary-planner-test")
+    monkeypatch.setenv("LLM_BASE_URL", "https://other.example/v1")
+    with pytest.raises(LLMError, match="llm_api_key_missing_or_invalid"):
+        part_grounding.part_model_key(config, {
+            **settings, "LLM_BASE_URL": "https://other.example/v1", "LLM_API_KEY": "file-test",
+        })
+    monkeypatch.setenv("WRS_PART_LLM_API_KEY", "part-only-test")
+    assert part_grounding.part_model_key(config, settings) == "part-only-test"
 
 
 async def test_two_api_phases_pass_through_non_handle_part():

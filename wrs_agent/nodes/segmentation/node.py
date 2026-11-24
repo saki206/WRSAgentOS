@@ -25,7 +25,13 @@ from wrs_agent.nodes.segmentation.data import (
 from wrs_agent.nodes.vision.artifacts import ArtifactCache, ArtifactRequest, artifact_owner
 from wrs_agent.nodes.vision.locations import read_location
 from wrs_agent.schemas import Boundary, Empty, Name, VisionData, new_id
-from wrs_agent.skills.vision.grasping import SEGMENT, SEGMENT_PART, SEGMENT_REGION, SegmentOutput
+from wrs_agent.skills.vision.grasping import (
+    SEGMENT,
+    SEGMENT_PART,
+    SEGMENT_REGION,
+    PartRegionArgs,
+    SegmentOutput,
+)
 
 BOX_BACKENDS = {"fastsam-box", "fastsam-part"}
 
@@ -102,11 +108,13 @@ class SegmentationNode(Node):
         if self.options.backend == "fastsam-part":
             self.part_client = self._part_client()
             self.on_close(self.part_client.aclose)
-        skill = {"fastsam-box": SEGMENT_REGION, "fastsam-part": SEGMENT_PART}.get(
-            self.options.backend, SEGMENT,
-        )
+        skills = {
+            "fastsam-box": (SEGMENT_REGION,),
+            "fastsam-part": (SEGMENT_REGION, SEGMENT_PART),
+        }.get(self.options.backend, (SEGMENT,))
         self.actions(ActionExecutor(
-            self.journal, state=SegmentationState(), skills=(skill.bind(self.segment),),
+            self.journal, state=SegmentationState(),
+            skills=tuple(skill.bind(self.segment) for skill in skills),
             backend=self.options.backend, features_extra={"robot_controls": False,
                                           "controller_flush": False,
                                           "verification": "task_scoped_segmentation",
@@ -185,7 +193,7 @@ class SegmentationNode(Node):
                 observed_at = time.monotonic() - age
                 location = located.info
                 info, arrays, target = location.observation, located.arrays, location.target
-                if self.options.backend == "fastsam-part":
+                if isinstance(args, PartRegionArgs):
                     if stop.is_set():
                         return False
                     part = await self._ground_part(args, location, arrays["rgb"], observed_at, stop)

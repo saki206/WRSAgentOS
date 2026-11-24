@@ -433,6 +433,7 @@ class TaskStatus(Boundary):
     state: Annotated[TaskState, BeforeValidator(lambda value: TaskState(value))]
     reason: str = ""
     steps: dict[str, str] = Field(default_factory=dict)
+    step_outputs: dict[str, dict] = Field(default_factory=dict)
     active_actions: dict[str, str] = Field(default_factory=dict)
     error: ErrorInfo | None = None
 

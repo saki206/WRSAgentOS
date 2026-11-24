@@ -69,6 +69,34 @@ PART_SCHEMA = {
     "required": ["object", "action", "preferred_parts", "avoid_parts"],
 }
 
+VOICE_GRASP_PROMPT = (
+    "First route the user's goal. Return intent 'grasp' only when the user requests a "
+    "standalone grasp or lift of one identifiable object, or asks for grasp candidates "
+    "for one object. A request for a specific grasp part is still a standalone grasp. "
+    "For a grasp, preserve explicit visual attributes such as color in the object noun phrase. "
+    "Set selection to 'leftmost' or 'rightmost' only for an explicit left/right instance "
+    "request, such as the cup on the left. Keep that direction out of the object noun phrase. "
+    "Otherwise, including for every non-grasp intent, set selection to 'only'. "
+    "For a grasp, fill suggestion using the grasp rules below. Return 'clarify' with "
+    "null suggestion when a grasp request omits the object, includes several targets, "
+    "or also asks to move, place, pass, or use the grasped object. "
+    "Return 'other' with null suggestion for unrelated goals, including ordinary "
+    "movement, scene descriptions, gripper controls and questions about how to grasp. "
+    "Interpret the user command in its own language. The grasp rules below apply only "
+    "when intent is 'grasp'."
+)
+
+VOICE_GRASP_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "intent": {"type": "string", "enum": ["grasp", "other", "clarify"]},
+        "selection": {"type": "string", "enum": ["only", "leftmost", "rightmost"]},
+        "suggestion": {"anyOf": [PART_SCHEMA, {"type": "null"}]},
+    },
+    "required": ["intent", "selection", "suggestion"],
+}
+
 
 class PreferredPart(Boundary):
     part: str = Field(min_length=1, max_length=64)
@@ -94,6 +122,20 @@ class GraspPartSuggestion(Boundary):
             raise ValueError("invalid_preferred_part_name")
         if any(not PART_NAME.fullmatch(item) or len(item) > 64 for item in self.avoid_parts):
             raise ValueError("invalid_avoid_part")
+        return self
+
+
+class VoiceGraspSuggestion(Boundary):
+    intent: Literal["grasp", "other", "clarify"]
+    selection: Literal["only", "leftmost", "rightmost"]
+    suggestion: GraspPartSuggestion | None
+
+    @model_validator(mode="after")
+    def check_intent(self):
+        if (self.intent == "grasp") != (self.suggestion is not None):
+            raise ValueError("grasp_suggestion_intent_mismatch")
+        if self.intent != "grasp" and self.selection != "only":
+            raise ValueError("grasp_selection_intent_mismatch")
         return self
 
 

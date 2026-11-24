@@ -34,7 +34,8 @@ python -m scripts.check_gpt_fastsam --image "photo.jpg" --goal "把碗夹起来�
 120 秒时限，可用 `--timeout` 调整。可以通过 `--model`、`--base-url`、
 `--protocol`、`--reasoning-effort`、`--max-output-tokens` 和 `--proxy` 配置。
 支持 Responses 和 Chat Completions 协议，服务须支持图像输入及严格 JSON Schema。
-自定义地址使用 `LLM_API_KEY`，OpenAI 默认地址使用 `OPENAI_API_KEY`。
+自定义地址使用 `WRS_PART_LLM_API_KEY`，OpenAI 默认地址使用 `OPENAI_API_KEY`。
+旧配置的 `LLM_API_KEY` 只在其配置的 API 地址与部位模型地址一致时可复用。
 命令行只提供本地程序的参数。文字建议和图像定位均由 Python 通过 HTTP API Key 调用。
 配置优先级依次是命令行参数、进程环境变量、`--env-file`、默认值。系统代理变量不参与请求。
 
@@ -45,6 +46,7 @@ python -m scripts.check_gpt_fastsam --image "photo.jpg" --goal "把碗夹起来�
 | `WRS_PART_LLM_MODEL` | 模型 ID，默认 `gpt-6.2-sol` |
 | `WRS_PART_LLM_PROTOCOL` | `openai_responses` 或 `openai_chat` |
 | `WRS_PART_LLM_BASE_URL` | 服务 API 根地址，默认 `https://api.openai.com/v1` |
+| `WRS_PART_LLM_API_KEY` | 自定义部位模型服务的专用密钥 |
 | `WRS_PART_LLM_REASONING_EFFORT` | GPT‑6.2 Sol 默认 `medium`。其他模型默认使用服务端设置，`omit` 显式省略 |
 | `WRS_PART_LLM_TIMEOUT_S` | 请求时限，实时定位还受同帧观测有效期约束 |
 | `WRS_PART_LLM_MAX_TOKENS` | 单次输出 token 上限 |
@@ -106,6 +108,10 @@ GPT 的证据供人工复查，`matched` 表示候选与框匹配。
 `把碗夹起来，抓把手`。06 从口令取得物体名和首选部位，再提交
 `locate_object → segment_part → infer_grasps`。分割节点复用定位保留的 RGB、深度和 XYZ，
 在同一像素网格上产生掩码，并通过标准 `segment_id` 交给 GraspNet。
+启用部位模式的 03 同时提供 `segment_region`，整物体任务仍可直接使用 YOLO 的框。
 
 节点沿用 30 秒观测有效期，并给分割及下游读取预留 5 秒。定位超时、结果歧义或帧过期时，
 本次任务会失败。06 会输出观测 ID、分割 ID 和三维抓姿候选。
+
+原语音示例也可以提交同一份抓姿计划。按[语音部位模式](../examples/voice/README.md#用语音生成指定部位的抓姿)
+配置 07 和 03 后，口令来自本地 ASR，抓姿候选通过 09 查看。

@@ -18,6 +18,10 @@ _MESSAGES = {
     "part_box_too_small": "部位框过小，无法可靠分割。",
     "part_image_too_large": "定位图片超过允许的尺寸或字节数。",
     "part_grounding_failed": "部位定位请求失败或返回无效结果。",
+    "part_suggestion_invalid": "语音抓取的部位建议格式无效。",
+    "part_grasp_skills_unavailable": (
+        "抓姿链路尚未就绪。请在同一语音环境启动 YOLO、部位模式 FastSAM 和 GraspNet。"
+    ),
     "region_mask_ambiguous": "多个分割掩码与定位框匹配程度接近，无法唯一确定目标。",
     "target_not_found": "当前画面未找到满足条件的目标。",
     "target_ambiguous": "当前画面有多个符合条件的目标，请明确目标或指定方位。",

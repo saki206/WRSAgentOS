@@ -72,8 +72,9 @@ async def test_voice_planner_virtual_grasp_and_speech(llm_server, cancel, region
         await eventually(stack.system.clients["wrs"].features,
                          lambda f: f.backend == "wrs-grasp", timeout=10)
         # The client and Agent discover independently; wait for the planner's providers too.
+        # A first descriptor read can use the registry's 0.3 s probe and its 2 s retry.
         await eventually(
-            lambda: registry.transport("agent").request("request/nodes", {}),
+            lambda: registry.transport("agent").request("request/nodes", {}, timeout=3),
             lambda nodes: all(nodes.get(name, {}).get("ready")
                               for name in (*kinds, "wrs", "tts")),
             timeout=10,
