@@ -1,5 +1,6 @@
-"""Every teaching file and the observable outcome checked by verify.py."""
+"""列出仓库的示例文件和 verify.py 检查的预期输出。"""
 
+# 这些示例有可核对的终端输出，验收脚本据此判断运行结果。
 WRS = {
     "nodes/06_late_node.py": ["直接调用： SUCCEEDED", "Agent 调度： SUCCEEDED"],
     "beginner/01_action.py": ["动作结果： SUCCEEDED", "当前位置： B"],
@@ -26,7 +27,7 @@ WRS = {
     "wrs/08_scene.py": ["场景坐标系： world", "物体： table", "物体： A", "碰撞规划已验证： False"],
     "wrs/04_move_relative.py": ["上 SUCCEEDED", "下 SUCCEEDED", "左 SUCCEEDED", "右 SUCCEEDED"],
 }
-# Real service/client groups are exercised together in test_developer_examples.py.
+# 服务端和客户端成对运行，由 test_developer_examples.py 一起验证。
 PAIRED = {
     "wrs/05_start_node.py",
     "wrs/06_control_arm.py",
@@ -40,7 +41,7 @@ PAIRED = {
     "camera/00_start_router.py", "camera/01_start_camera.py",
     "camera/04_start_agent.py", "camera/05_speak_objects.py",
 }
-# Explicit audio/model or interactive examples; never run by the default verifier.
+# 需要音频、模型、设备或交互的示例由使用者显式启动，默认验收跳过。
 LIVE = {
     "grasping/00_start_router.py", "grasping/01_start_camera.py",
     "grasping/02_start_locator.py", "grasping/03_start_fastsam.py",
@@ -51,10 +52,12 @@ LIVE = {
     "tts/01_start_node.py", "tts/02_speak.py", "tts/03_cancel.py",
     "camera/06_read_frame.py", "camera/02_start_yolo.py", "camera/03_start_tts.py",
 }
+# 公共配置和辅助模块纳入文件清单，供其他示例导入。
 SUPPORT = {"nodes/greet_skill.py", "voice/commands.py", "grasping/settings.py", "_session.py"}
 
 
 def check_catalog(root):
+    """检查示例目录和分类清单是否一致，防止新增文件漏登记。"""
     actual = {str(path.relative_to(root)).replace("\\", "/") for path in root.rglob("*.py")}
     expected = set(WRS) | PAIRED | LIVE | SUPPORT
     if actual != expected:
