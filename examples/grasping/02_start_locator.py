@@ -6,13 +6,12 @@ from importlib.resources import files
 from pathlib import Path
 
 from examples._session import use_local_token
+from examples.grasping.settings import connection_settings
 from wrs_agent.nodes.serve import serve_node
 from wrs_agent.nodes.vision import YoloNode
 
 ROOT = Path(__file__).resolve().parents[2]
-ENDPOINT = "tcp/127.0.0.1:7451"
-ENV_ID = "voice-goal"
-SESSION = "voice"
+ENDPOINT, ENV_ID, SESSION = connection_settings()
 WEIGHTS = ROOT / ".local/models/yolo/yolov8m-worldv2.pt"
 CLIP_WEIGHTS = ROOT / ".local/models/fastsam/ViT-B-32.pt"
 DEVICE = "0"

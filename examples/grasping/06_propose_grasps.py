@@ -4,14 +4,13 @@ import asyncio
 import os
 
 from examples._session import use_local_token
+from examples.grasping.settings import connection_settings
 from wrs_agent import System, step
 from wrs_agent.nodes.camera.client import CameraClient
 from wrs_agent.nodes.grasp.data import read_grasps
 from wrs_agent.skills.vision.grasping import GraspsOutput
 
-ENDPOINT = "tcp/127.0.0.1:7449"
-ENV_ID = "wrs-demo"
-SESSION = "wrs"
+ENDPOINT, ENV_ID, SESSION = connection_settings()
 TARGET = "banana"  # YOLO-World 使用简短英文目标，例如 cup、green pepper。
 SELECTION = "only"  # 多个目标默认拒绝；明确指定时可用 leftmost / rightmost。
 
@@ -61,6 +60,12 @@ async def main():
         goal = os.environ.get("WRS_GRASP_GOAL", "").strip()
         if len(goal) > 1024:
             raise SystemExit("WRS_GRASP_GOAL 不得超过 1024 字符。")
+        # 通过节点公布的技能检查模式，在调用模型或提交任务之前发现配置不一致。
+        skill = "segment_part" if goal else "segment_region"
+        skills = system.registry.snapshot().get("segmentation", {}).get("skills", {})
+        if skill not in skills:
+            required = "1" if goal else "0"
+            raise SystemExit(f"03 未提供 {skill}，请用 WRS_PART_GROUNDING={required} 重启 03。")
         target, part = await suggest_part(goal) if goal else (TARGET, None)
         locate = step("locate_object", target=target, selection=SELECTION)
         location_input = {"location_id": {"step_id": locate.step_id, "field": "location_id"}}

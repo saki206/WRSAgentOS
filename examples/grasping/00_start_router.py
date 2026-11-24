@@ -4,13 +4,16 @@ import asyncio
 from pathlib import Path
 
 from examples._session import use_local_token
+from examples.grasping.settings import connection_settings
 from wrs_agent.processes import NO_WINDOW, check_router_version, router_path
 
 CONFIG = Path(__file__).resolve().parents[1] / "camera/router.json5"
-SESSION = "wrs"
+ENDPOINT, ENV_ID, SESSION = connection_settings()
 
 
 async def main():
+    if ENV_ID == "voice-goal":
+        raise SystemExit("语音环境请复用 examples/voice/07_start_llm_voice.py 启动的 Router。")
     use_local_token(SESSION, create=True)
     executable = router_path()
     await asyncio.to_thread(check_router_version, executable)
@@ -18,7 +21,7 @@ async def main():
         str(executable), "-c", str(CONFIG), creationflags=NO_WINDOW,
     )
     try:
-        print("Router 地址：tcp/127.0.0.1:7449；继续运行 01_start_camera.py。", flush=True)
+        print(f"Router 地址：{ENDPOINT}；继续运行 01_start_camera.py。", flush=True)
         exit_code = await router.wait()
         if exit_code:
             raise SystemExit(exit_code)

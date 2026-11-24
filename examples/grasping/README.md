@@ -24,12 +24,14 @@
 采集配置为 `WIDTH, HEIGHT, FPS = 848, 480, 30`，可在 01 顶部修改后重启相机节点。
 该频率只控制 RGB/Depth/SDK 点云采集；02–04 的推理仍由任务触发。
 
-与 camera 共用 `tcp/127.0.0.1:7449`、`wrs-demo` 和 `wrs` 会话。若 camera 的
-00、01、05 已运行，直接复用，**不要重复启动同名节点**。camera/02 与这里的 02
+默认使用 `tcp/127.0.0.1:7449`、`wrs-demo` 和 `wrs` 会话。相机和 Agent 已在
+相同配置下运行时可直接复用，**不要重复启动同名节点**。camera/02 与这里的 02
 都注册 `yolo`，应关闭 camera/02 后再启动本组的 YOLO-World。可用
 [camera/06_read_frame.py](../camera/06_read_frame.py) 查看 RGB 和 YOLO 结果，需将其
 ENDPOINT / ENV_ID / SESSION 与本组对齐；关闭预览不影响采集。
-Router 配置复用 [camera/router.json5](../camera/router.json5)。
+Router 配置复用 [camera/router.json5](../camera/router.json5)。00–06 共用
+[`settings.py`](settings.py) 的连接配置。接入语音环境时，按
+[语音示例](../voice/README.md)设置 `WRS_GRASP_PROFILE=voice-goal`。
 
 命令行也无需添加脚本参数；例如从仓库根目录启动 GraspNet：
 

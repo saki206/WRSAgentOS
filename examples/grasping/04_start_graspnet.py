@@ -7,13 +7,12 @@ from importlib.resources import files
 from pathlib import Path
 
 from examples._session import use_local_token
+from examples.grasping.settings import connection_settings
 from wrs_agent.nodes.grasp import GraspNetNode
 from wrs_agent.nodes.serve import serve_node
 
 ROOT = Path(__file__).resolve().parents[2]
-ENDPOINT = "tcp/127.0.0.1:7451"
-ENV_ID = "voice-goal"
-SESSION = "voice"
+ENDPOINT, ENV_ID, SESSION = connection_settings()
 WEIGHTS = ROOT / ".local/models/graspnet/checkpoint-rs.tar"
 SOURCE = ROOT / ".local/src/graspnet-baseline"
 MAX_WIDTH_M = .05  # 夹爪最大开口（米）；不是机器人 TCP 或相机外参。

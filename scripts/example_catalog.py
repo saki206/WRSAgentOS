@@ -51,7 +51,7 @@ LIVE = {
     "tts/01_start_node.py", "tts/02_speak.py", "tts/03_cancel.py",
     "camera/06_read_frame.py", "camera/02_start_yolo.py", "camera/03_start_tts.py",
 }
-SUPPORT = {"nodes/greet_skill.py", "voice/commands.py", "_session.py"}
+SUPPORT = {"nodes/greet_skill.py", "voice/commands.py", "grasping/settings.py", "_session.py"}
 
 
 def check_catalog(root):

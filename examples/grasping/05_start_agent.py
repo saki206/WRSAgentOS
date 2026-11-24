@@ -3,11 +3,10 @@
 import asyncio
 
 from examples._session import use_local_token
+from examples.grasping.settings import connection_settings
 from wrs_agent.nodes.serve import serve_node
 
-ENDPOINT = "tcp/127.0.0.1:7451"
-ENV_ID = "voice-goal"
-SESSION = "voice"
+ENDPOINT, ENV_ID, SESSION = connection_settings()
 
 
 async def main():

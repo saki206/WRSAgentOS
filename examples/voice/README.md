@@ -183,9 +183,10 @@ viewer 可以先于相机或 YOLO 启动，节点加入后会刷新；重启 09 
 需要重新生成后及时查看。加载数量显示需重启 Agent（本组的 07）和 09；旧 Agent
 没有 step_outputs 时会提示升级，不会把缺少结果误报为 0 个候选。
 
-将 grasping 示例接入 09 时，确认 `grasping/02_start_locator.py`、
+将 grasping 示例接入 09 时，在运行 `grasping/02_start_locator.py`、
 `03_start_fastsam.py`、`04_start_graspnet.py` 和 `06_propose_grasps.py`
-顶部的三项均为（修改后要重启进程）：
+的每个终端或 IDE 运行配置里设置 `WRS_GRASP_PROFILE=voice-goal`，然后启动相应进程。
+该配置统一选择以下连接参数：
 
 ```python
 ENDPOINT = "tcp/127.0.0.1:7451"
