@@ -41,6 +41,8 @@ SYSTEM_PROMPT = (
 PART_NAME = re.compile(r"[a-z][a-z0-9 _-]*\Z")
 
 
+# The wire schema lists only model-generated fields. Local validation adds the
+# visual-confirmation requirement and enforces bounds before any downstream use.
 PART_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -96,7 +98,7 @@ class GraspPartSuggestion(Boundary):
 
 
 def grounding_prompt(goal: str, object_description: str, part: str) -> str:
-    """Shared, category-independent prompt for part localization model comparisons."""
+    """Build the shared image prompt from the actual goal, object and proposed part."""
     prompt = (
         "Locate a proposed grasp part on the target object in this image. "
         f"User command: {goal}\n"
@@ -154,6 +156,7 @@ class PartBox(Boundary):
         return self
 
     def pixel_box(self, width: int, height: int) -> list[float] | None:
+        """Convert normalized coordinates to continuous, half-open pixel boundaries."""
         if self.box is None:
             return None
         return [value * size / 999 for value, size in zip(

@@ -17,11 +17,11 @@ from pydantic import Field, ValidationError
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
 from wrs_agent.planner.grasp_part_prompts import PartBox, check_box
 from wrs_agent.planner.providers.part_grounding import (
-    DEFAULT_MODEL,
-    DEFAULT_URL,
     MAX_IMAGE_BYTES,
     check_image_size,
+    part_model_config,
     part_model_key,
+    part_settings,
 )
 from wrs_agent.planner.providers.wire import LLMError
 from wrs_agent.schemas import MAX_BYTES, Boundary
@@ -45,6 +45,7 @@ class AnnotationIdentity(Boundary):
 
 
 def image_identity(rgb):
+    """Fingerprint dimensions and oriented pixels rather than the input file encoding."""
     height, width = rgb.shape[:2]
     digest = hashlib.sha256(struct.pack(">II", width, height))
     digest.update(memoryview(rgb).cast("B"))
@@ -64,6 +65,7 @@ def read_json_file(path):
 
 
 def replay_box(path, identity, allow_legacy):
+    """Accept legacy results only on explicit request, with unverified provenance."""
     raw = read_json_file(path)
     if allow_legacy and "image" not in json.loads(raw):
         return PartBox.model_validate_json(raw), False
@@ -78,27 +80,17 @@ def write_json(path, data):
 
 
 def model_settings(args, parser):
-    from wrs_agent.planner.providers.llm import LLMConfig
-
-    if args.env_file is not None:
-        if not args.env_file.is_file():
-            parser.error("--env-file must point to an existing file")
-    effort = args.reasoning_effort
-    if effort is None and args.model == DEFAULT_MODEL:
-        effort = "medium"
     try:
-        config = LLMConfig(
+        settings = part_settings(args.env_file)
+        config = part_model_config(
+            settings,
             base_url=args.base_url, protocol=args.protocol, model=args.model,
-            timeout_s=args.timeout, reasoning_effort=None if effort == "omit" else effort,
+            timeout_s=args.timeout, reasoning_effort=args.reasoning_effort,
             proxy=args.proxy, max_tokens=args.max_output_tokens,
         )
-    except ValidationError as exc:
-        field = exc.errors(include_input=False)[0]["loc"][0]
-        parser.error(f"invalid model configuration: {field}")
-    try:
-        return config, part_model_key(config, args.env_file)
-    except LLMError:
-        parser.error("set OPENAI_API_KEY (default endpoint) or LLM_API_KEY (custom endpoint)")
+        return config, part_model_key(config, settings)
+    except LLMError as exc:
+        parser.error(f"model configuration failed: {exc.code}")
 
 
 async def locate_part(config, api_key, goal, image, out):
@@ -190,18 +182,17 @@ def main(argv=None):
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--output-dir", type=Path, required=True, help="New output directory")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--base-url", default=DEFAULT_URL)
-    parser.add_argument("--protocol", choices=["openai_responses", "openai_chat"],
-                        default="openai_responses")
+    parser.add_argument("--model")
+    parser.add_argument("--base-url")
+    parser.add_argument("--protocol", choices=["openai_responses", "openai_chat"])
     parser.add_argument(
         "--reasoning-effort",
         choices=["omit", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
     )
-    parser.add_argument("--timeout", type=float, default=120, help="Total API budget in seconds")
-    parser.add_argument("--max-output-tokens", type=int, default=4096)
+    parser.add_argument("--timeout", type=float, help="Total API budget in seconds")
+    parser.add_argument("--max-output-tokens", type=int)
     parser.add_argument("--proxy", help="Explicit HTTP(S) proxy")
-    parser.add_argument("--env-file", type=Path, help="Read only the selected API credential")
+    parser.add_argument("--env-file", type=Path, help="Read part-model settings and API credential")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument("--weights", type=Path, default=ROOT / ".local/models/fastsam/FastSAM-x.pt")
     parser.add_argument("--box-json", type=Path, help="Replay an existing gpt-box.json offline")
@@ -221,6 +212,7 @@ def main(argv=None):
         parser.error("invalid box size limits")
     if args.box_json is None:
         config, api_key = model_settings(args, parser)
+        args.model = config.model
     if args.allow_legacy_box and (not args.box_json or args.expected_mask):
         parser.error("--allow-legacy-box requires --box-json and cannot be used for evaluation")
     try:
@@ -235,6 +227,7 @@ def main(argv=None):
     if dest.exists():
         parser.error("--output-dir already exists")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # Stage beside the destination so final publication is a same-volume rename.
     with TemporaryDirectory(dir=dest.parent, prefix=".part-run-") as staging:
         out = Path(staging) / "result"
         out.mkdir()

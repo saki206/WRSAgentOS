@@ -23,12 +23,14 @@ async def suggest_part(goal):
         PartGroundingClient,
         part_model_config,
         part_model_key,
+        part_settings,
     )
     from wrs_agent.planner.providers.wire import LLMError
 
-    config = part_model_config()
     try:
-        key = part_model_key(config, os.environ.get("WRS_PART_LLM_ENV_FILE"))
+        settings = part_settings(os.environ.get("WRS_PART_LLM_ENV_FILE"))
+        config = part_model_config(settings)
+        key = part_model_key(config, settings)
         async with PartGroundingClient(config, key) as client:
             suggestion = await client.suggest(goal)
     except LLMError as exc:

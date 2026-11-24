@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from io import BytesIO
+from pathlib import Path
 
 import httpx
 from PIL import Image
@@ -28,20 +29,52 @@ MAX_IMAGE_PIXELS = 4096 * 4096
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 
 
-def part_model_config():
-    return LLMConfig(base_url=DEFAULT_URL, protocol="openai_responses", model=DEFAULT_MODEL,
-                     reasoning_effort="medium", timeout_s=120.0, max_tokens=4096)
+def part_settings(env_file=None):
+    """Read only part-specific settings so the robot planner can use a different model."""
+    if env_file is None:
+        return {}
+    from dotenv import dotenv_values
+
+    if not Path(env_file).is_file():
+        raise LLMError("part_env_file_not_found")
+    try:
+        return dotenv_values(env_file, encoding="utf-8-sig", interpolate=False)
+    except (OSError, UnicodeError):
+        raise LLMError("part_env_file_invalid") from None
 
 
-def part_model_key(config, env_file=None):
+def part_model_config(settings=None, **overrides):
+    """Use repository model validation with defaults shared by both entry points."""
+    settings = settings or {}
+    defaults = {
+        "base_url": DEFAULT_URL, "protocol": "openai_responses", "model": DEFAULT_MODEL,
+        "timeout_s": "120", "max_tokens": "4096", "proxy": "",
+    }
+    selected = {}
+    for name, default in defaults.items():
+        variable = "WRS_PART_LLM_" + name.upper()
+        selected["LLM_" + name.upper()] = (
+            os.environ.get(variable) or settings.get(variable) or default
+        )
+    effort_variable = "WRS_PART_LLM_REASONING_EFFORT"
+    effort = os.environ.get(effort_variable) or settings.get(effort_variable)
+    for name, value in overrides.items():
+        if value is not None and name != "reasoning_effort":
+            selected["LLM_" + name.upper()] = str(value)
+    effort = overrides.get("reasoning_effort") or effort
+    if effort is None and selected["LLM_MODEL"].strip() == DEFAULT_MODEL:
+        effort = "medium"
+    selected["LLM_REASONING_EFFORT"] = "" if effort == "omit" else effort
+    config = LLMConfig.from_env(selected)
+    if config.protocol not in PROTOCOLS:
+        raise LLMError("part_protocol_unsupported")
+    return config
+
+
+def part_model_key(config, settings=None):
+    """Send OpenAI credentials only to the default OpenAI endpoint."""
     key_name = "OPENAI_API_KEY" if config.base_url == DEFAULT_URL else "LLM_API_KEY"
-    key = os.environ.get(key_name)
-    if not key and env_file is not None:
-        from dotenv import dotenv_values
-
-        key = dotenv_values(env_file, encoding="utf-8-sig", interpolate=False).get(key_name)
-    if not key and config.local:
-        return ""
+    key = os.environ.get(key_name) or (settings or {}).get(key_name)
     if not key or not key.isascii() or not key.isprintable() or " " in key:
         raise LLMError("llm_api_key_missing_or_invalid")
     return key
@@ -53,9 +86,11 @@ def check_image_size(width, height):
 
 
 def encode_image(image: Image.Image):
+    # Rebuild from RGB bytes so EXIF and other source metadata stay out of the request.
     check_image_size(*image.size)
     buffer = BytesIO()
-    image.save(buffer, format="PNG")
+    rgb = image.convert("RGB")
+    Image.frombytes("RGB", rgb.size, rgb.tobytes()).save(buffer, format="PNG")
     if buffer.tell() > MAX_IMAGE_BYTES:
         raise LLMError("part_image_too_large")
     return "data:image/png;base64," + base64.b64encode(buffer.getbuffer()).decode("ascii")
@@ -66,13 +101,17 @@ def reply_text(body, protocol):
         if protocol == "openai_chat":
             choice, = body["choices"]
             message = choice["message"]
-            if choice["finish_reason"] != "stop" or message.get("refusal"):
+            if (choice["finish_reason"] != "stop" or message.get("refusal")
+                    or message.get("tool_calls") or message.get("function_call")):
                 raise LLMError("llm_incomplete_reply")
             text = message["content"]
         else:
             if body["status"] != "completed":
                 raise LLMError("llm_incomplete_reply")
-            message, = (item for item in body["output"] if item["type"] == "message")
+            output = body["output"]
+            if any(item["type"] not in {"reasoning", "message"} for item in output):
+                raise LLMError("llm_invalid_reply")
+            message, = (item for item in output if item["type"] == "message")
             parts = message["content"]
             if any(part["type"] != "output_text" for part in parts):
                 raise LLMError("llm_incomplete_reply")
@@ -87,6 +126,7 @@ def reply_text(body, protocol):
 
 
 class PartGroundingClient:
+    """Key-authenticated HTTP client for both text suggestions and image localization."""
     def __init__(self, config, key, *, transport=None):
         self.config = config
         self.wire = PROTOCOLS[config.protocol]
@@ -132,6 +172,7 @@ class PartGroundingClient:
                 body["reasoning_effort"] = config.reasoning_effort
         try:
             async with asyncio.timeout(config.timeout_s):
+                # Bound bytes as they arrive and only decode a complete, small response.
                 data = bytearray()
                 async with self.client.stream("POST", self.wire.PATH, json=body) as response:
                     response.raise_for_status()

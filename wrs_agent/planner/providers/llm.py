@@ -142,10 +142,11 @@ class LLMConfig(Boundary):
         return urlsplit(self.base_url).hostname in LOOPBACK
 
     @classmethod
-    def from_env(cls):
+    def from_env(cls, environ=None):
         """Read LLM_* variables. Model and endpoint are both required: credentials alone
         do not identify an account's enabled model, and no vendor is assumed."""
-        env = {name: os.environ.get("LLM_" + name.upper(), "").strip() for name in ENV_FIELDS}
+        source = os.environ if environ is None else environ
+        env = {name: (source.get("LLM_" + name.upper()) or "").strip() for name in ENV_FIELDS}
         for name in ("model", "base_url"):
             if not env[name]:
                 raise LLMError(f"llm_{name}_missing")

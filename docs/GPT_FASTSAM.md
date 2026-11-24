@@ -35,7 +35,22 @@ python -m scripts.check_gpt_fastsam --image "photo.jpg" --goal "把碗夹起来�
 `--protocol`、`--reasoning-effort`、`--max-output-tokens` 和 `--proxy` 配置。
 支持 Responses 和 Chat Completions 协议，服务须支持图像输入及严格 JSON Schema。
 自定义地址使用 `LLM_API_KEY`，OpenAI 默认地址使用 `OPENAI_API_KEY`。
-环境变量优先于 `--env-file`，系统代理变量不参与请求。
+命令行只提供本地程序的参数。文字建议和图像定位均由 Python 通过 HTTP API Key 调用。
+配置优先级依次是命令行参数、进程环境变量、`--env-file`、默认值。系统代理变量不参与请求。
+
+本地图片入口和实时模式共享以下模型配置，可写在同一个本地配置文件里：
+
+| 变量 | 用途 |
+| --- | --- |
+| `WRS_PART_LLM_MODEL` | 模型 ID，默认 `gpt-6.2-sol` |
+| `WRS_PART_LLM_PROTOCOL` | `openai_responses` 或 `openai_chat` |
+| `WRS_PART_LLM_BASE_URL` | 服务 API 根地址，默认 `https://api.openai.com/v1` |
+| `WRS_PART_LLM_REASONING_EFFORT` | GPT‑6.2 Sol 默认 `medium`。其他模型默认使用服务端设置，`omit` 显式省略 |
+| `WRS_PART_LLM_TIMEOUT_S` | 请求时限，实时定位还受同帧观测有效期约束 |
+| `WRS_PART_LLM_MAX_TOKENS` | 单次输出 token 上限 |
+| `WRS_PART_LLM_PROXY` | 显式 HTTP(S) 代理 |
+
+部位模型只读取这些专用变量。原有任务规划模型继续使用自己的 `LLM_*` 配置。
 
 ## 图像与留存
 
@@ -84,10 +99,10 @@ GPT 的证据供人工复查，`matched` 表示候选与框匹配。
 
 按[抓取示例](../examples/grasping/README.md)启动 00–05。启动 03 前，在它的进程环境中
 设置 `WRS_PART_GROUNDING=1`，并设置 `OPENAI_API_KEY`，或将
-`WRS_PART_LLM_ENV_FILE` 指向本地密钥文件。该模式使用 GPT‑6.2 Sol 中档推理，
-会将定位节点保留的一帧 RGB 发送给 OpenAI。深度、点云和掩码留在本机。
+`WRS_PART_LLM_ENV_FILE` 指向本地配置文件。默认使用 GPT‑6.2 Sol 中档推理，
+会将定位节点保留的一帧 RGB 发送给配置的服务。深度、点云和掩码留在本机。
 
-为运行 06 的进程配置相同的凭据，并设置 `WRS_GRASP_GOAL`，例如
+为运行 06 的进程配置相同的模型和凭据，并设置 `WRS_GRASP_GOAL`，例如
 `把碗夹起来，抓把手`。06 从口令取得物体名和首选部位，再提交
 `locate_object → segment_part → infer_grasps`。分割节点复用定位保留的 RGB、深度和 XYZ，
 在同一像素网格上产生掩码，并通过标准 `segment_id` 交给 GraspNet。

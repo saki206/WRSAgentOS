@@ -85,11 +85,12 @@ class SegmentationNode(Node):
             PartGroundingClient,
             part_model_config,
             part_model_key,
+            part_settings,
         )
 
-        config = part_model_config()
-        env_file = os.environ.get("WRS_PART_LLM_ENV_FILE")
-        return PartGroundingClient(config, part_model_key(config, env_file))
+        settings = part_settings(os.environ.get("WRS_PART_LLM_ENV_FILE"))
+        config = part_model_config(settings)
+        return PartGroundingClient(config, part_model_key(config, settings))
 
     async def setup(self):
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="segmentation")

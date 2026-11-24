@@ -19,7 +19,7 @@ from wrs_agent.planner.providers.wire import LLMError
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat"])
 async def test_provider_request_with_image(protocol):
-    config = LLMConfig(base_url=cli.DEFAULT_URL, model=cli.DEFAULT_MODEL,
+    config = LLMConfig(base_url=part_grounding.DEFAULT_URL, model=part_grounding.DEFAULT_MODEL,
                        protocol=protocol, reasoning_effort="medium")
 
     def handle(request):
@@ -54,7 +54,7 @@ async def test_provider_timeout_has_safe_error():
         await asyncio.sleep(1)
         return httpx.Response(500)
 
-    config = LLMConfig(base_url=cli.DEFAULT_URL, model=cli.DEFAULT_MODEL,
+    config = LLMConfig(base_url=part_grounding.DEFAULT_URL, model=part_grounding.DEFAULT_MODEL,
                        protocol="openai_responses", timeout_s=0.01)
     async with PartGroundingClient(config, "fake", transport=httpx.MockTransport(handle)) as client:
         with pytest.raises(LLMError, match="llm_timeout"):
@@ -179,3 +179,65 @@ def test_annotation_binds_image_and_mask_bytes(tmp_path):
     Image.new("L", (10, 8), 128).save(path)
     with pytest.raises(ValueError, match="fingerprint mismatch"):
         cli.read_expected_mask(path, identity)
+
+
+def test_model_settings_are_shared_and_credentials_are_endpoint_specific(tmp_path, monkeypatch):
+    """A separate part provider must not forward the OpenAI key or use the planner model."""
+    monkeypatch.setenv("LLM_MODEL", "unrelated-planning-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    config = part_grounding.part_model_config()
+    assert config.model == "gpt-6.2-sol" and config.reasoning_effort == "medium"
+    assert part_grounding.part_model_key(config) == "openai-test"
+
+    env_file = tmp_path / "provider.env"
+    env_file.write_text(
+        "WRS_PART_LLM_BASE_URL=https://provider.example/v1\n"
+        "WRS_PART_LLM_PROTOCOL=openai_chat\nWRS_PART_LLM_MODEL=vision-model\n"
+    )
+    settings = part_grounding.part_settings(env_file)
+    config = part_grounding.part_model_config(settings, timeout_s=15)
+    assert config.model == "vision-model" and config.reasoning_effort is None
+    assert config.protocol == "openai_chat" and config.timeout_s == 15
+    with pytest.raises(LLMError, match="llm_api_key_missing_or_invalid"):
+        part_grounding.part_model_key(config, settings)
+    assert part_grounding.part_model_key(config, {**settings, "LLM_API_KEY": "custom-test"}) == (
+        "custom-test"
+    )
+
+
+async def test_two_api_phases_pass_through_non_handle_part():
+    """Exercise the actual request serializers and response contracts for both stages."""
+    model = part_grounding.part_model_config()
+    calls = []
+    goal = "Lift the box by its side panel"
+
+    def handle(request):
+        body = json.loads(request.content)
+        content = body["input"][0]["content"]
+        assert goal in content[0]["text"]
+        calls.append(body["text"]["format"]["name"])
+        if len(calls) == 1:
+            assert len(content) == 1
+            answer = {
+                "object": "box", "action": "lift", "avoid_parts": [],
+                "preferred_parts": [{
+                    "part": "side panel", "reason": "Rigid panel", "condition": "Fits the jaws",
+                }],
+            }
+        else:
+            assert "Proposed part: side panel." in content[0]["text"]
+            assert content[1]["type"] == "input_image"
+            answer = {"box": [80, 100, 900, 600], "status": "matched", "evidence": "Visible panel."}
+        return httpx.Response(200, json={"status": "completed", "output": [{
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": json.dumps(answer)}],
+        }]})
+
+    async with PartGroundingClient(model, "fake", transport=httpx.MockTransport(handle)) as client:
+        part = await client.suggest(goal)
+        box = await client.ground(
+            goal, part.object, part.preferred_parts[0].part, Image.new("RGB", (10, 10)),
+        )
+    assert calls == ["grasp_part_suggestion", "grasp_part_box"]
+    assert box.box == [80, 100, 900, 600]
