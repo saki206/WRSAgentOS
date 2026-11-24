@@ -1,5 +1,3 @@
-"""部位定位和 FastSAM 的离线回归，使用模拟服务和小幅测试图片。"""
-
 import asyncio
 import hashlib
 import json
@@ -21,12 +19,10 @@ from wrs_agent.planner.providers.wire import LLMError
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat"])
 async def test_provider_request_with_image(protocol):
-    """检查两种协议各自的鉴权、图像和 JSON Schema 请求格式。"""
     config = LLMConfig(base_url=part_grounding.DEFAULT_URL, model=part_grounding.DEFAULT_MODEL,
                        protocol=protocol, reasoning_effort="medium")
 
     def handle(request):
-        # 拦截真实客户端产生的 HTTP 请求，再返回该协议的模拟响应。
         assert request.headers["Authorization"] == "Bearer fake"
         body = json.loads(request.content)
         assert body["model"] == "gpt-6.2-sol" and body["store"] is False
@@ -54,7 +50,6 @@ async def test_provider_request_with_image(protocol):
 
 
 async def test_provider_timeout_has_safe_error():
-    """模拟响应比配置时限更慢，确认程序返回统一的超时错误。"""
     async def handle(_request):
         await asyncio.sleep(1)
         return httpx.Response(500)
@@ -67,7 +62,6 @@ async def test_provider_timeout_has_safe_error():
 
 
 async def test_provider_rejects_oversized_response_and_upload(monkeypatch):
-    """用调小的字节上限覆盖上传拦截和响应中途终止。"""
     monkeypatch.setattr(part_grounding, "MAX_BYTES", 20)
     monkeypatch.setattr(part_grounding, "MAX_IMAGE_BYTES", 10)
     calls = []
@@ -87,7 +81,6 @@ async def test_provider_rejects_oversized_response_and_upload(monkeypatch):
 
 
 def test_refusal_and_invalid_box_are_rejected():
-    """校验拒答、非法坐标、空框状态冲突及几何限制。"""
     refusal = {"type": "message", "role": "assistant", "content": [{"type": "refusal"}]}
     with pytest.raises(LLMError, match="llm_incomplete_reply"):
         reply_text({"status": "completed", "output": [refusal]}, "openai_responses")
@@ -105,14 +98,12 @@ def test_refusal_and_invalid_box_are_rejected():
 
 @pytest.mark.parametrize("ambiguous", [False, True])
 def test_retry_records_crop_and_preserves_ambiguity(monkeypatch, ambiguous):
-    """整图无候选时检查裁剪重试、掩码还原和歧义退出。"""
     fastsam = FastSamSegmenter.__new__(FastSamSegmenter)
     fastsam.confidence = 0.4
     rgb = np.zeros((200, 200, 3), dtype=np.uint8)
     trace = []
 
     def masks(image, *, confidence):
-        # 模拟裁剪内只出现一个掩码，或出现两个同样匹配的掩码。
         if image.shape == rgb.shape:
             raise ValueError("target_not_found")
         assert confidence == 0.4
@@ -135,7 +126,6 @@ def test_retry_records_crop_and_preserves_ambiguity(monkeypatch, ambiguous):
 
 
 def test_exif_and_output_publication(tmp_path, monkeypatch):
-    """检查 EXIF 方向、异常清理及绑定图片后的离线复放。"""
     source = tmp_path / "source.jpg"
     image = Image.new("RGB", (40, 20))
     exif = image.getexif()
@@ -152,14 +142,12 @@ def test_exif_and_output_publication(tmp_path, monkeypatch):
         raise LLMError("llm_timeout")
 
     monkeypatch.setattr(cli, "locate_part", fail)
-    # 模拟接口写出中间结果后失败，最终输出目录应仍未发布。
     with pytest.raises(SystemExit) as error:
         cli.main(args)
     assert error.value.code == 3 and not out.exists()
     assert not list(tmp_path.glob(".part-run-*"))
 
     box = tmp_path / "box.json"
-    # 同一份框分别验证缺少指纹、绑定正确原图和替换成同尺寸图片的情况。
     box.write_text(json.dumps({"box": None, "status": "part_not_visible", "evidence": "Occluded"}))
     with pytest.raises(SystemExit) as error:
         cli.main([*args, "--box-json", str(box)])
@@ -178,7 +166,6 @@ def test_exif_and_output_publication(tmp_path, monkeypatch):
 
 
 def test_annotation_binds_image_and_mask_bytes(tmp_path):
-    """替换原图或篡改掩码文件后，评估入口都应拒绝。"""
     identity = cli.image_identity(np.zeros((8, 10, 3), dtype=np.uint8))
     other = cli.image_identity(np.ones((8, 10, 3), dtype=np.uint8))
     path = tmp_path / "mask.png"
@@ -195,7 +182,7 @@ def test_annotation_binds_image_and_mask_bytes(tmp_path):
 
 
 def test_model_settings_are_shared_and_credentials_are_endpoint_specific(tmp_path, monkeypatch):
-    """更换部位服务时，检查其配置与任务规划配置及 OpenAI 凭据隔离。"""
+    """A separate part provider must not forward the OpenAI key or use the planner model."""
     monkeypatch.setenv("LLM_MODEL", "unrelated-planning-model")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
@@ -220,7 +207,7 @@ def test_model_settings_are_shared_and_credentials_are_endpoint_specific(tmp_pat
 
 
 async def test_two_api_phases_pass_through_non_handle_part():
-    """用方盒侧板验证两阶段动态传参，覆盖把手以外的部位。"""
+    """Exercise the actual request serializers and response contracts for both stages."""
     model = part_grounding.part_model_config()
     calls = []
     goal = "Lift the box by its side panel"
@@ -231,7 +218,6 @@ async def test_two_api_phases_pass_through_non_handle_part():
         assert goal in content[0]["text"]
         calls.append(body["text"]["format"]["name"])
         if len(calls) == 1:
-            # 第一段只看口令。第二段必须收到第一段返回的部位和待定位图片。
             assert len(content) == 1
             answer = {
                 "object": "box", "action": "lift", "avoid_parts": [],

@@ -60,7 +60,7 @@ async def main():
         goal = os.environ.get("WRS_GRASP_GOAL", "").strip()
         if len(goal) > 1024:
             raise SystemExit("WRS_GRASP_GOAL 不得超过 1024 字符。")
-        # 通过节点公布的技能检查模式，在调用模型或提交任务之前发现配置不一致。
+        # Check the advertised skill before calling the model or submitting the task.
         skill = "segment_part" if goal else "segment_region"
         skills = system.registry.snapshot().get("segmentation", {}).get("skills", {})
         if skill not in skills:

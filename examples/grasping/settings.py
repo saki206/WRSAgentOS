@@ -1,4 +1,4 @@
-"""为抓取示例统一选择 Zenoh 地址、环境与本地凭据会话。"""
+"""Shared Zenoh endpoint, environment, and local token session for grasping examples."""
 
 import os
 
@@ -9,7 +9,7 @@ PROFILES = {
 
 
 def connection_settings():
-    """默认使用独立抓取示例，需要复用语音环境时显式选择对应配置。"""
+    """Use the standalone grasping profile unless the voice profile is selected."""
     profile = os.environ.get("WRS_GRASP_PROFILE", "wrs-demo")
     if profile not in PROFILES:
         raise SystemExit("WRS_GRASP_PROFILE 应为 wrs-demo 或 voice-goal。")

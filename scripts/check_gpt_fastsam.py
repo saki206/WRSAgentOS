@@ -1,4 +1,4 @@
-"""对本地 RGB 图片定位抓取部位，用 FastSAM 生成可评估的掩码。"""
+"""Run language-guided FastSAM part segmentation on a saved RGB image."""
 
 import argparse
 import asyncio
@@ -30,28 +30,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ImageIdentity(Boundary):
-    """记录校正后的尺寸和像素指纹，区别尺寸相同但内容不同的图片。"""
-
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class BoundPartBox(PartBox):
-    """持久化保存的定位框，带有生成它的图像指纹。"""
-
     image: ImageIdentity
 
 
 class AnnotationIdentity(Boundary):
-    """同时绑定原图和人工掩码，防止评估时换错任一文件。"""
-
     image: ImageIdentity
     mask_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 def image_identity(rgb):
-    """对校正后的尺寸和 RGB 像素计算指纹，同像素换存文件格式仍能匹配。"""
+    """Fingerprint dimensions and oriented pixels rather than the input file encoding."""
     height, width = rgb.shape[:2]
     digest = hashlib.sha256(struct.pack(">II", width, height))
     digest.update(memoryview(rgb).cast("B"))
@@ -59,7 +53,6 @@ def image_identity(rgb):
 
 
 def read_limited(path, limit):
-    """最多读取上限加一个字节，用于判定文件是否超限。"""
     with path.open("rb") as source:
         data = source.read(limit + 1)
     if len(data) > limit:
@@ -68,12 +61,11 @@ def read_limited(path, limit):
 
 
 def read_json_file(path):
-    """限制 JSON 大小，并兼容包含 UTF-8 BOM 的配置文件。"""
     return read_limited(path, MAX_BYTES).decode("utf-8-sig")
 
 
 def replay_box(path, identity, allow_legacy):
-    """先核对历史框对应的图像。显式允许无指纹旧框时，返回未验证标记。"""
+    """Accept legacy results only on explicit request, with unverified provenance."""
     raw = read_json_file(path)
     if allow_legacy and "image" not in json.loads(raw):
         return PartBox.model_validate_json(raw), False
@@ -84,12 +76,10 @@ def replay_box(path, identity, allow_legacy):
 
 
 def write_json(path, data):
-    """用 UTF-8 保存可直接阅读的结构化中间结果。"""
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def model_settings(args, parser):
-    """合并显式参数和共享模型配置，按服务地址取得对应 API Key。"""
     try:
         settings = part_settings(args.env_file)
         config = part_model_config(
@@ -104,12 +94,10 @@ def model_settings(args, parser):
 
 
 async def locate_part(config, api_key, goal, image, out):
-    """在共享时限内先提出部位，再看图核实其归属。"""
     from wrs_agent.planner.providers.part_grounding import PartGroundingClient
 
     async with PartGroundingClient(config, api_key) as client:
         async with asyncio.timeout(config.timeout_s):
-            # 第一次调用只用口令。第二次才发送照片和第一阶段的首选部位。
             suggestion = await client.suggest(goal)
             write_json(out / "grasp-part-suggestion.json", suggestion.model_dump())
             return await client.ground(goal, suggestion.object, suggestion.preferred_parts[0].part,
@@ -117,14 +105,12 @@ async def locate_part(config, api_key, goal, image, out):
 
 
 def load_rgb(path):
-    """先限制文件和像素大小，再校正方向并统一为 RGB。"""
     with Image.open(BytesIO(read_limited(path, MAX_IMAGE_BYTES))) as source:
         check_image_size(*source.size)
         return np.array(ImageOps.exif_transpose(source).convert("RGB"))
 
 
 def save_overlay(rgb, box, mask, path):
-    """在副本上用红色展示掩码、青色展示定位框，方便人工复核。"""
     pixels = rgb.copy()
     if mask is not None:
         pixels[mask] = (0.45 * pixels[mask] + 0.55 * np.array([255, 50, 20])).astype(np.uint8)
@@ -135,7 +121,6 @@ def save_overlay(rgb, box, mask, path):
 
 
 def segment_part(args, rgb, answer, out):
-    """在原图网格上分割部位，并记录每次匹配的参数和结果。"""
     height, width = rgb.shape[:2]
     box = answer.pixel_box(width, height)
     report = {
@@ -145,7 +130,6 @@ def segment_part(args, rgb, answer, out):
         "box_iou": None, "attempts": [], "box_iou_minimum": 0.5, "box_iou_margin": 0.05,
     }
     mask = None
-    # 空框和几何校验失败都直接保留诊断。只有合格的框才启动 FastSAM。
     if box is None:
         report["status"] = "part_unverified"
     elif reason := check_box(box, rgb.shape, args.min_box_pixels, args.max_box_fraction):
@@ -155,7 +139,6 @@ def segment_part(args, rgb, answer, out):
         sha256 = json.loads(manifest.read_text("utf-8"))["sha256"]
         fastsam = FastSamSegmenter(args.weights, sha256, device=args.device)
         try:
-            # 先匹配整图候选，无匹配时才按既有规则重试。
             mask, score = fastsam.segment_box_local_retry(rgb, box, trace=report["attempts"])
         except ValueError as exc:
             report.update(status="mask_selection_failed", error=str(exc))
@@ -167,7 +150,6 @@ def segment_part(args, rgb, answer, out):
 
 
 def read_expected_mask(path, identity):
-    """确认标注来自本图且文件未被替换，再读取白色部位像素。"""
     annotation = AnnotationIdentity.model_validate_json(read_json_file(
         path.with_name(path.name + ".json"),
     ))
@@ -185,7 +167,6 @@ def read_expected_mask(path, identity):
 
 
 def expected_box_iou(box, mask):
-    """把人工掩码转成外接框，只评估 GPT 定位框的交并比。"""
     if box is None:
         return 0.0
     rows, columns = np.nonzero(mask)
@@ -197,12 +178,10 @@ def expected_box_iou(box, mask):
 
 
 def main(argv=None):
-    """按顺序完成输入校验、定位、分割、可选评估和结果发布。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--output-dir", type=Path, required=True, help="New output directory")
-    # 联机参数只用于配置 HTTP 请求。复放走下方独立的本地校验路径。
     parser.add_argument("--model")
     parser.add_argument("--base-url")
     parser.add_argument("--protocol", choices=["openai_responses", "openai_chat"])
@@ -236,7 +215,6 @@ def main(argv=None):
         args.model = config.model
     if args.allow_legacy_box and (not args.box_json or args.expected_mask):
         parser.error("--allow-legacy-box requires --box-json and cannot be used for evaluation")
-    # 先验证原图、定位框和标注的对应关系，避免对错配文件执行推理。
     try:
         rgb = load_rgb(args.image)
         identity = image_identity(rgb)
@@ -249,8 +227,7 @@ def main(argv=None):
     if dest.exists():
         parser.error("--output-dir already exists")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # 在同一磁盘的临时目录写完全部结果，再重命名为目标目录。
-    # 中途失败时，临时目录由上下文清理。
+    # Stage beside the destination so final publication is a same-volume rename.
     with TemporaryDirectory(dir=dest.parent, prefix=".part-run-") as staging:
         out = Path(staging) / "result"
         out.mkdir()
@@ -265,7 +242,6 @@ def main(argv=None):
         except ValidationError:
             parser.exit(3, "Invalid structured grasp-part result\n")
         result = answer.model_dump(exclude={"image"})
-        # 无来源指纹的旧框不能借这次复放升级成已验证结果。
         if verified:
             result["image"] = identity.model_dump()
         write_json(out / "gpt-box.json", result)
@@ -273,14 +249,12 @@ def main(argv=None):
         report, mask = segment_part(args, rgb, answer, out)
         report["replay_image_verified"] = verified if args.box_json else None
         if expected is not None:
-            # 分开统计定位框和像素掩码，便于区分定位误差与分割误差。
             report["expected_box_iou"] = expected_box_iou(report["pixel_box"], expected)
             report["expected_mask_iou"] = (
                 float((mask & expected).sum() / (mask | expected).sum())
                 if mask is not None else 0.0
             )
         if args.save_images:
-            # 含现场 RGB 的图片只在用户显式开启时保存。
             Image.fromarray(rgb).save(out / "input.png")
             save_overlay(rgb, report["pixel_box"], mask, out / "fastsam-final-overlay.jpg")
         write_json(out / "fastsam.json", report)

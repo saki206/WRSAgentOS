@@ -27,7 +27,7 @@ def test_grasp_examples_choose_the_same_connection(monkeypatch, profile, expecte
 
 
 def config_router_listen():
-    # 监听地址来自真实 Router 配置，不能只比较 Python 脚本的常量。
+    # Check the actual router config as well as the Python connection settings.
     return Path("examples/camera/router.json5").read_text(encoding="utf-8")
 
 
