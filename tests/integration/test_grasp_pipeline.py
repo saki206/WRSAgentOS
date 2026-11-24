@@ -8,6 +8,7 @@ import runpy
 import numpy as np
 import pytest
 from conftest import eventually
+from llm_fixtures import chat_reply
 
 from wrs_agent.errors import AgentError
 from wrs_agent.nodes.camera.client import CameraClient
@@ -32,6 +33,24 @@ def preparation(target="box", *, region=False, part=False, goal="Lift the cup by
         Step(step_id="grasps", skill="infer_grasps", depends_on=["segment"],
              inputs={"segment_id": {"step_id": "segment", "field": "segment_id"}}),
     ])
+
+
+async def test_part_model_configuration_failure_does_not_block_ordinary_voice(
+    llm_server, monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("WRS_PART_LLM_ENV_FILE", str(tmp_path / "missing.env"))
+    llm_server.response = chat_reply(json.dumps({"kind": "answer", "text": "ordinary reply"}))
+    async with LocalStack(duration=.03, live_model=True, voice_part_grasp=True) as stack:
+        system = stack.system
+        receipt = await system.send_text("把杯子夹起来")
+        grasp = await system.planning(receipt.request_id).wait(timeout=10)
+        assert grasp.state == "FAILED" and grasp.error.code == "part_env_file_not_found"
+        assert llm_server.requests == []
+
+        receipt = await system.send_text("向左移动两厘米")
+        ordinary = await system.planning(receipt.request_id).wait(timeout=10)
+        assert ordinary.state == "ANSWER" and ordinary.reason == "ordinary reply"
+        assert len(llm_server.requests) == 1
 
 
 async def test_recognized_voice_goal_prepares_grasps_and_stop_cancels_planning(
@@ -203,18 +222,30 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
             ui = CameraPreview(endpoint=stack.endpoint, env_id=stack.env_id,
                                segmentation_node_id=segmentation)
             await ui.start()
+
+            def preview(view):
+                # A browser keeps requesting the view while a new Zenoh session discovers it.
+                response = ui.http_response(f"/camera/preview?view={view}", None)
+                return json.loads(response.body)
+
             try:
-                await ui._update("grasps")
-                assert ui.latest["grasps"]["state"] == "ready", ui.latest["grasps"]
-                assert ui.latest["grasps"]["observation_id"] == output["observation_id"]
-                assert ui.latest["grasps"]["candidate_set_id"] == output["candidate_set_id"]
-                assert len(ui.latest["grasps"]["grasps"]) == 1
-                assert 0 < ui.latest["grasps"]["segmented_point_count"] < len(
-                    ui.latest["grasps"]["points"],
+                grasp_preview = await eventually(
+                    lambda: preview("grasps"),
+                    lambda value: value.get("candidate_set_id") == output["candidate_set_id"],
+                    timeout=4,
                 )
-                await ui._update("segmentation")
-                mask = ui.latest["segmentation"]
-                assert mask["state"] == "ready", mask
+                assert grasp_preview["state"] == "ready"
+                assert grasp_preview["observation_id"] == output["observation_id"]
+                assert len(grasp_preview["grasps"]) == 1
+                assert 0 < grasp_preview["segmented_point_count"] < len(
+                    grasp_preview["points"],
+                )
+                mask = await eventually(
+                    lambda: preview("segmentation"),
+                    lambda value: value.get("segment_id") == data.segment.info.segment_id,
+                    timeout=4,
+                )
+                assert mask["state"] == "ready"
                 assert mask["observation_id"] == output["observation_id"]
                 assert mask["segment_id"] == data.segment.info.segment_id
                 assert mask["segmentation"].startswith("data:image/jpeg;base64,")
@@ -228,19 +259,25 @@ async def test_same_frame_pipeline_ambiguity_and_late_cancel(segmentation, monke
                     await runtime.start(TaskRequest(request_id=new_id(), plan=bad_location))
                     failed = await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
                     assert failed["error"]["code"] == "artifact_task_mismatch"
-                    await ui._update("segmentation")
-                    assert ui.latest["segmentation"]["state"] != "ready"
-                    assert "segmentation" not in ui.latest["segmentation"]
+                    unavailable = await eventually(
+                        lambda: preview("segmentation"),
+                        lambda value: value["reason"] == "segment_not_available",
+                        timeout=4,
+                    )
+                    assert "segmentation" not in unavailable
                 replacement = await runtime.start(TaskRequest(
                     request_id=new_id(), plan=preparation(target, region=region, part=part),
                 ))
                 fresh = await eventually(runtime.snapshot,
                                          lambda s: s["state"] in {"SUCCEEDED", "FAILED"}, timeout=8)
                 assert fresh["state"] == "SUCCEEDED", fresh
-                await ui._update("grasps")
-                assert ui.latest["grasps"]["state"] == "ready", ui.latest["grasps"]
-                assert ui.latest["grasps"]["task_id"] == replacement["task_id"]
-                assert ui.latest["grasps"]["candidate_set_id"] != output["candidate_set_id"]
+                current = await eventually(
+                    lambda: preview("grasps"),
+                    lambda value: value.get("task_id") == replacement["task_id"],
+                    timeout=4,
+                )
+                assert current["state"] == "ready"
+                assert current["candidate_set_id"] != output["candidate_set_id"]
                 with pytest.raises(AgentError, match="artifact_expired"):
                     await read_grasps(registry.transport("graspnet"),
                                       output["candidate_set_id"], receipt["task_id"])

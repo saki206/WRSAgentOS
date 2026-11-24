@@ -28,6 +28,20 @@ class AgentNode(Node):
     options_type = AgentOptions
     features = ("task.coordinate",)
 
+    @staticmethod
+    def _voice_part_client():
+        # Resolve part-model settings only when a goal uses that model.
+        from wrs_agent.planner.providers.part_grounding import (
+            PartGroundingClient,
+            part_model_config,
+            part_model_key,
+            part_settings,
+        )
+
+        settings = part_settings(os.environ.get("WRS_PART_LLM_ENV_FILE"))
+        config = part_model_config(settings)
+        return PartGroundingClient(config, part_model_key(config, settings))
+
     async def setup(self):
         planner = None
         if self.options.live_model:
@@ -38,18 +52,8 @@ class AgentNode(Node):
             planner = ModelPlanner(model)
         if self.options.voice_part_grasp:
             from wrs_agent.planner.grasp_parts import VoiceGraspPlanner
-            from wrs_agent.planner.providers.part_grounding import (
-                PartGroundingClient,
-                part_model_config,
-                part_model_key,
-                part_settings,
-            )
 
-            settings = part_settings(os.environ.get("WRS_PART_LLM_ENV_FILE"))
-            config = part_model_config(settings)
-            part_client = PartGroundingClient(config, part_model_key(config, settings))
-            self.on_close(part_client.aclose)
-            planner = VoiceGraspPlanner(part_client, planner)
+            planner = VoiceGraspPlanner(self._voice_part_client, planner)
 
         registry = self.discover()
         registry.local[self.node_id] = self.info

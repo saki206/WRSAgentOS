@@ -14,7 +14,7 @@ _MESSAGES = {
     "segmentation_grid_mismatch": "分割掩码尺寸与原始 RGB 不一致，不能匹配深度和点云。",
     "region_mask_not_found": "FastSAM 未找到与定位框充分重合的掩码，请检查定位框和画面。",
     "part_not_found": "视觉模型未能确认同一目标上的指定部位。",
-    "part_box_outside_object": "部位框偏离本次检测到的目标实例。",
+    "part_box_outside_object": "部位框与本次检测到的目标框缺少足够的重叠。",
     "part_box_too_small": "部位框过小，无法可靠分割。",
     "part_image_too_large": "定位图片超过允许的尺寸或字节数。",
     "part_grounding_failed": "部位定位请求失败或返回无效结果。",

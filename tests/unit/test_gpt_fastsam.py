@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
 import json
+import time
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import numpy as np
@@ -13,6 +15,8 @@ from pydantic import ValidationError
 from scripts import check_gpt_fastsam as cli
 from wrs_agent.errors import AgentError
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
+from wrs_agent.nodes.segmentation.node import SegmentationNode
+from wrs_agent.nodes.vision.artifacts import ArtifactCache
 from wrs_agent.planner import PlanDecision, PlanRequest
 from wrs_agent.planner.grasp_part_prompts import PartBox, VoiceGraspSuggestion
 from wrs_agent.planner.grasp_parts import VoiceGraspPlanner
@@ -25,18 +29,32 @@ from wrs_agent.planner.providers.wire import LLMError
 async def test_voice_routes_ordinary_goals_and_clarifies_incomplete_grasps():
     other = PlanDecision(kind="answer", text="ordinary planner")
     base = SimpleNamespace(plan=AsyncMock(return_value=other), last_usage={"output_tokens": 4})
-    part = SimpleNamespace(suggest_voice_goal=AsyncMock())
-    planner = VoiceGraspPlanner(part, base)
-    request = PlanRequest(user_goal="向右移动", world={}, skills=[])
-    part.suggest_voice_goal.return_value = VoiceGraspSuggestion(
-        intent="other", selection="only", suggestion=None,
-    )
-    assert await planner.plan(request) is other
-    base.plan.assert_awaited_once_with(request)
+    part = SimpleNamespace(suggest_voice_goal=AsyncMock(side_effect=LLMError("llm_timeout")))
+    factory = Mock(return_value=nullcontext(part))
+    planner = VoiceGraspPlanner(factory, base)
+    for goal in (
+        "向左移动两厘米", "移动到抓取位置", "请把机械臂移动到抓取位置",
+        "查看上一轮的抓姿", "打开夹爪", "夹紧夹爪", "lift the robot arm",
+        "show the last grasp result",
+    ):
+        request = PlanRequest(user_goal=goal, world={}, skills=[])
+        assert await planner.plan(request) is other
+        base.plan.assert_awaited_with(request)
+    factory.assert_not_called()
     assert planner.last_usage == {"output_tokens": 4}
 
     base.plan.reset_mock()
+    for goal in (
+        "抓杯子", "麻烦抓杯子", "把漏勺夹起来", "把杯子夹一下",
+        "计算杯子的抓姿", "pick the cup up",
+    ):
+        request = request.model_copy(update={"user_goal": goal})
+        with pytest.raises(LLMError, match="llm_timeout"):
+            await planner.plan(request)
+        part.suggest_voice_goal.assert_awaited_with(goal)
+
     request = request.model_copy(update={"user_goal": "夹起来"})
+    part.suggest_voice_goal.side_effect = None
     part.suggest_voice_goal.return_value = VoiceGraspSuggestion(
         intent="clarify", selection="only", suggestion=None,
     )
@@ -56,7 +74,7 @@ async def test_voice_preserves_explicit_instance_and_rejects_invalid_grasp_setup
         }),
     ))
     base = SimpleNamespace(plan=AsyncMock())
-    planner = VoiceGraspPlanner(part, base)
+    planner = VoiceGraspPlanner(lambda: nullcontext(part), base)
     request = PlanRequest(user_goal="把左边的盒子夹起来", world={}, skills=[
         {"name": "locate_object"}, {"name": "segment_region"}, {"name": "infer_grasps"},
     ])
@@ -72,6 +90,38 @@ async def test_voice_preserves_explicit_instance_and_rejects_invalid_grasp_setup
     with pytest.raises(AgentError, match="part_suggestion_invalid"):
         await planner.plan(request)
     base.plan.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("box", "matches"), [
+    ([270, 50, 310, 300], True),   # Long handle with an attachment reaching into the object.
+    ([385, 300, 425, 365], False),  # Nearby independent object within the old center margin.
+    ([379, 300, 425, 365], False),  # Only a thin overlap with the neighboring object.
+    ([245, 300, 290, 360], True),   # A normal part wholly within the detector box.
+])
+async def test_realtime_part_box_checks_overlap_instead_of_its_center(box, matches):
+    width, height = 640, 480
+    normalized = [round(value / extent * 999) for value, extent in
+                  zip(box, (width, height, width, height), strict=True)]
+    node = SegmentationNode.__new__(SegmentationNode)
+    node.cache = ArtifactCache()
+    node.part_client = SimpleNamespace(
+        config=SimpleNamespace(model="fixture"),
+        ground=AsyncMock(return_value=PartBox(box=normalized, status="matched",
+                                             evidence="Fixture part.")),
+    )
+    location = SimpleNamespace(
+        target="strainer", object=SimpleNamespace(box=[220, 280, 380, 400]),
+        observation=SimpleNamespace(width=width, height=height),
+    )
+    args = SimpleNamespace(goal="Lift the strainer", part="handle")
+    rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    if matches:
+        result = await node._ground_part(args, location, rgb, time.monotonic(), asyncio.Event())
+        assert result.name == "handle"
+        assert result.box == pytest.approx(box, abs=1)
+    else:
+        with pytest.raises(AgentError, match="part_box_outside_object"):
+            await node._ground_part(args, location, rgb, time.monotonic(), asyncio.Event())
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat"])

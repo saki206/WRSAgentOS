@@ -36,6 +36,18 @@ from wrs_agent.skills.vision.grasping import (
 BOX_BACKENDS = {"fastsam-box", "fastsam-part"}
 
 
+def part_box_overlaps_object(part_box, object_box):
+    """Check the projected attachment area without constraining long parts' centers."""
+    px1, py1, px2, py2 = part_box
+    ox1, oy1, ox2, oy2 = object_box
+    overlap_width = min(px2, ox2) - max(px1, ox1)
+    overlap_height = min(py2, oy2) - max(py1, oy1)
+    # Ignore edge contact and small slivers while allowing most of a long handle outside.
+    min_width = max(2, .1 * min(px2 - px1, ox2 - ox1))
+    min_height = max(2, .1 * min(py2 - py1, oy2 - oy1))
+    return overlap_width >= min_width and overlap_height >= min_height
+
+
 class SegmentationOptions(Boundary):
     backend: Literal["sam3", "fastsam", "fastsam-box", "fastsam-part"] = "sam3"
     weights: Path = Field(strict=False)
@@ -169,10 +181,7 @@ class SegmentationNode(Node):
             raise AgentError("part_not_found")
         if reason := check_box(box, rgb.shape):
             raise AgentError(reason)
-        x1, y1, x2, y2 = object_box
-        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-        dx, dy = (x2 - x1) / 2, (y2 - y1) / 2
-        if not (x1 - dx <= cx <= x2 + dx and y1 - dy <= cy <= y2 + dy):
+        if not part_box_overlaps_object(box, object_box):
             raise AgentError("part_box_outside_object")
         return PartProvenance(
             name=args.part, box=box, grounding_model=self.part_client.config.model,
