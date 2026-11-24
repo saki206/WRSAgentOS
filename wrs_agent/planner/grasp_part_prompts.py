@@ -1,4 +1,4 @@
-"""Shared prompts and output contracts for language-guided part segmentation."""
+"""抓取部位的通用提示词、结构化输出和坐标校验。"""
 
 import re
 from typing import Literal
@@ -7,6 +7,8 @@ from pydantic import Field, model_validator
 
 from wrs_agent.schemas import Boundary
 
+# 第一阶段只输入口令。模型按任务和部件的物理功能提出首选部位，
+# 是否存在、是否承重和是否适配夹爪，都需要后续确认。
 SYSTEM_PROMPT = (
     "You suggest where the robot itself should grasp an object with a parallel-jaw gripper. "
     "Optimize for the robot's own stable lifting, carrying, or use of the object. "
@@ -38,11 +40,12 @@ SYSTEM_PROMPT = (
     "Do not output coordinates, grasp poses, motor commands, or claims of visual confirmation."
 )
 
+# 使用短英文名称，方便把目标和部位传给后续视觉模块。
 PART_NAME = re.compile(r"[a-z][a-z0-9 _-]*\Z")
 
 
-# The wire schema lists only model-generated fields. Local validation adds the
-# visual-confirmation requirement and enforces bounds before any downstream use.
+# 发给模型的 JSON Schema 只包含需要生成的字段。
+# 本地模型另行标记待视觉确认，并限制名称格式和字段长度。
 PART_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -71,12 +74,16 @@ PART_SCHEMA = {
 
 
 class PreferredPart(Boundary):
+    """一个首选部位，以及推荐理由和采用前需要核实的条件。"""
+
     part: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=500)
     condition: str = Field(min_length=1, max_length=500)
 
 
 class GraspPartSuggestion(Boundary):
+    """文字阶段的输出，供视觉定位和原仓库目标定位技能使用。"""
+
     object: str = Field(min_length=1, max_length=64)
     action: str = Field(min_length=1, max_length=80)
     preferred_parts: list[PreferredPart] = Field(min_length=1, max_length=1)
@@ -85,6 +92,7 @@ class GraspPartSuggestion(Boundary):
 
     @model_validator(mode="after")
     def check_suggestion(self):
+        # 除了接口要求的字符串类型，还要校验物体名和部位名的实际格式。
         if not PART_NAME.fullmatch(self.object):
             raise ValueError("invalid_object_name")
         names = {item.part.casefold() for item in self.preferred_parts}
@@ -98,7 +106,9 @@ class GraspPartSuggestion(Boundary):
 
 
 def grounding_prompt(goal: str, object_description: str, part: str) -> str:
-    """Build the shared image prompt from the actual goal, object and proposed part."""
+    """将用户口令、目标物体和首选部位填入第二阶段提示词。"""
+    # 核实部位是否属于当前实例。固定附件可能通过中间结构连接，
+    # 独立支架、其他物体和背景不应被框入。
     prompt = (
         "Locate a proposed grasp part on the target object in this image. "
         f"User command: {goal}\n"
@@ -129,6 +139,7 @@ def grounding_prompt(goal: str, object_description: str, part: str) -> str:
         "part, not the whole object or its surroundings. Use normalized image coordinates "
         "[x1,y1,x2,y2], integers from 0 to 999. "
     )
+    # 要求模型在证据不足时返回空框，便于程序中止本次分割。
     return prompt + (
         "Return only JSON with fields box, status, and evidence. box is four integers or null. "
         "Use matched exactly when box is not null. Other statuses are target_not_visible, "
@@ -138,6 +149,8 @@ def grounding_prompt(goal: str, object_description: str, part: str) -> str:
 
 
 class PartBox(Boundary):
+    """视觉定位输出。坐标使用 0–999 的归一化范围。"""
+
     box: list[int] | None = Field(min_length=4, max_length=4)
     status: Literal[
         "matched", "target_not_visible", "part_not_visible", "ambiguous_target",
@@ -147,6 +160,7 @@ class PartBox(Boundary):
 
     @model_validator(mode="after")
     def valid_box(self):
+        # 状态必须与框是否存在一致，有框时再检查坐标范围和顺序。
         if (self.box is not None) != (self.status == "matched"):
             raise ValueError("part_box_status_mismatch")
         if self.box is not None:
@@ -156,7 +170,7 @@ class PartBox(Boundary):
         return self
 
     def pixel_box(self, width: int, height: int) -> list[float] | None:
-        """Convert normalized coordinates to continuous, half-open pixel boundaries."""
+        """按原图尺寸换算像素边界，右侧和下侧使用不含端点的坐标。"""
         if self.box is None:
             return None
         return [value * size / 999 for value, size in zip(
@@ -165,6 +179,7 @@ class PartBox(Boundary):
 
 
 def check_box(box, shape, minimum=2, max_fraction=1):
+    """检查像素宽高和占图比例，返回失败原因或 None。"""
     x1, y1, x2, y2 = box
     if min(x2 - x1, y2 - y1) < minimum:
         return "part_box_too_small"
